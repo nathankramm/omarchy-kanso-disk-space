@@ -1,0 +1,784 @@
+#!/usr/bin/python3 -IS
+"""Kanso Disk Space's read-only measure (D53, D69–D74, D81, D97–D101, D104,
+D128, D129).
+
+Installed by `kanso-disk-space measure-install`, or by the card's Set up
+through pkexec, which runs the same steps (D80), as
+/usr/local/libexec/kanso-disk-measure (root:root 0755) with a sudoers rule
+that allows exactly `sudo -n /usr/local/libexec/kanso-disk-measure` and no
+arguments. The engine runs it in the daily scan only while the installed
+copy's sha256 matches this file, and it measures nothing unless the invoking
+user's installed plugin still holds a copy with its own sha256 (D98): a sudo
+rule left behind by a removed plugin unlocks nothing.
+
+It takes no arguments and reads no environment but SUDO_UID, which sudo
+sets itself. It writes nothing but one JSON line on stdout. It measures with
+compsize, which counts every extent once across all its arguments at its
+on-disk size and stays inside each argument's subvolume (-x):
+
+  Usage    compsize per row, cumulatively (Home, System, /var, Swap,
+           Snapshots), over every subvolume a mount reaches (D71)
+  Cleanup  per category, compsize(every subvolume) minus compsize(every
+           subvolume without the category's paths): what deleting it frees
+           now (D69); for a category held by snapshots, also the same
+           difference within its own subvolume: what it frees once they
+           rotate (D70); the same for each folder the request names alone,
+           while the run is young (D99); a kept category's own on-disk
+           size (D104)
+
+The category paths come from a request file the engine writes as the user,
+found from SUDO_UID's home, and every path is checked before it is used
+(D72). A checked path is opened one component at a time with O_NOFOLLOW and
+handed to compsize as /proc/self/fd/N/<name>, so a folder swapped for a
+symlink afterwards cannot redirect the measurement. compsize itself opens
+every path with O_NOFOLLOW and skips symlinks (compsize 1.5, compsize.c:243,
+284), but it walks by path, so a folder swapped mid-walk is followed as a
+middle component, within the same subvolume (-x, compsize.c:266). The helper
+therefore measures nothing exact when another login user exists or another
+uid owns a folder in /home (D72). A Usage folder sub-line measures only a
+folder the user could open themselves, at most three levels below its row
+(D81, D82), with any subvolume mounted inside it: sizes inside /root or
+another group's folder are never reported.
+"""
+
+import hashlib
+import json
+import os
+import pwd
+import re
+import stat
+import subprocess
+import sys
+import time
+
+COMPSIZE = "/usr/bin/compsize"
+BTRFS = "/usr/bin/btrfs"
+# best effort at its lowest level, never the idle class, which a busy disk
+# can starve until the run times out (D97)
+NICE = ("/usr/bin/nice", "-n", "10", "/usr/bin/ionice", "-c", "2", "-n", "7")
+MOUNTINFO = "/proc/self/mountinfo"
+NO_LOGIN = ("/usr/bin/nologin", "/sbin/nologin", "/bin/false", "/usr/bin/false")
+SNAPSHOTS = "/.snapshots"
+HOME_ROOT = "/home"
+REQUEST = ".local/state/kanso-disk-space/measure-request.json"
+PLUGIN_COPY = ".config/omarchy/plugins/io.github.nathankramm.kanso-disk-space/bin/kanso-disk-measure"
+REMOVE = (  # own-file: printed, the rule and the helper measure-install put there
+    "sudo rm /etc/sudoers.d/kanso-disk-measure /usr/local/libexec/kanso-disk-measure"  # own-file
+)
+PASS_TIMEOUT = 300
+MAX_REQUEST = 1 << 20
+MAX_CATEGORIES = 20
+MAX_PATHS = 5000
+MAX_CHILDREN = 40
+MAX_HELPER = 1 << 20
+MAX_EACH = 5
+# no folder of its own is started past this many seconds into the run (D99)
+EACH_BUDGET = 90
+# A category may only measure under the roots it is bound to (D72, D74); "~"
+# is the invoking user's home, where every path must also be the user's own.
+CATEGORY_ROOTS = {
+    "app-caches": ("~",),
+    "aur-cache": ("~",),
+    "downloads": ("~",),
+    "trash": ("~",),
+    "pacman-cache": ("/var/cache/pacman/pkg",),
+    "journal": ("/var/log/journal",),
+    "coredumps": ("/var/lib/systemd/coredump",),
+    "ollama": ("~/.ollama", "/var/lib/ollama", "/usr/share/ollama"),
+    "mise-versions": ("~/.local/share/mise/installs",),
+    # developer caches each tool names itself, anywhere in the home (D128)
+    "npm-cache": ("~",),
+    "bun-cache": ("~",),
+    "go-modules": ("~",),
+    "rust-toolchains": ("~",),
+    "cargo-registry": ("~",),
+    # Electron apps' Chromium cache folders (D129)
+    "electron-caches": ("~/.config",),
+}
+ROWS = ("home", "system", "var", "swap", "snapshots")
+ROW_ROOTS = {"home": "/home", "system": "/", "var": "/var"}
+EMPTY = ("No files.", "All empty or still-delalloced files.")
+
+
+class Refused(Exception):
+    """A request, a category or a path the helper will not measure."""
+
+
+# whether a compsize pass ran out of time this run (D101)
+TIMED_OUT = []
+
+
+# ---- measuring --------------------------------------------------------------
+
+
+def compsize(args, fds=()):
+    """compsize's TOTAL Disk Usage in bytes for `args`, or None when the run
+    failed or ran out of time. `fds` are the pinned folders the args name."""
+    if not args:
+        return 0
+    try:
+        p = subprocess.run(
+            [*NICE, COMPSIZE, "-b", "-x", *args],
+            capture_output=True,
+            text=True,
+            timeout=PASS_TIMEOUT,
+            check=False,
+            pass_fds=tuple(fds),
+            stdin=subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired:
+        TIMED_OUT.append(True)
+        return None
+    except OSError:
+        return None
+    m = re.search(r"^TOTAL\s+\S+\s+(\d+)", p.stdout, re.MULTILINE)
+    if m:
+        return int(m.group(1))
+    # a set with nothing in it (compsize.c:399-405)
+    return 0 if any(e in p.stderr for e in EMPTY) else None
+
+
+class Pins:
+    """Checked paths, opened once: every component from / with O_PATH and
+    O_NOFOLLOW, so none can be a symlink; compsize gets
+    /proc/self/fd/<parent>/<name> (D72)."""
+
+    def __init__(self):
+        self.parents = {}
+
+    def arg(self, path):
+        parent, name = os.path.split(path)
+        if not plain(path) or not name:
+            raise Refused(f"not a plain absolute path: {path!r}")
+        fd = self.parents.get(parent)
+        if fd is None:
+            fd = open_dir(parent)
+            self.parents[parent] = fd
+        try:
+            st = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        except OSError as e:
+            raise Refused(f"missing: {path}") from e
+        if stat.S_ISLNK(st.st_mode):
+            raise Refused(f"a symlink: {path}")
+        return f"/proc/self/fd/{fd}/{name}"
+
+    def fds(self):
+        return list(self.parents.values())
+
+    def close(self):
+        for fd in self.parents.values():
+            os.close(fd)
+        self.parents = {}
+
+
+def open_dir(path):
+    """An O_PATH fd for folder `path`, opened from / one component at a time
+    with O_NOFOLLOW: Refused when any component is a symlink."""
+    fd = os.open("/", os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for part in [p for p in path.split("/") if p]:
+            # with O_PATH|O_DIRECTORY, O_NOFOLLOW fails on a symlink
+            nxt = os.open(part, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                          dir_fd=fd)  # fmt: skip
+            os.close(fd)
+            fd = nxt
+    except OSError as e:
+        os.close(fd)
+        raise Refused(f"a symlink or not a folder on the way to {path}") from e
+    return fd
+
+
+def complement(root, excluded):
+    """Every path under `root` (its own st_dev) except the excluded ones:
+    a whole folder when nothing under it is excluded, else its children,
+    recursively. Symlinks and other subvolumes are never listed."""
+    excluded = {os.path.normpath(p) for p in excluded}
+    dev = os.lstat(root).st_dev
+
+    def walk(d):
+        if d in excluded:
+            return []
+        prefix = d.rstrip("/") + "/"
+        if not any(x.startswith(prefix) for x in excluded):
+            return [d]
+        out = []
+        for name in sorted(os.listdir(d)):
+            p = prefix + name
+            try:
+                st = os.lstat(p)
+            except OSError:
+                continue
+            if stat.S_ISLNK(st.st_mode) or st.st_dev != dev:
+                continue
+            out += walk(p)
+        return out
+
+    return walk(root)
+
+
+# ---- the layout -------------------------------------------------------------
+
+
+def unescape(s):
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), s)
+
+
+def btrfs_mounts(text):
+    """[(subvolume path, mount point)] of the btrfs filesystem mounted at /,
+    or None when / is not btrfs."""
+    rows = []
+    for line in text.splitlines():
+        left, _, right = line.partition(" - ")
+        f, r = left.split(), right.split()
+        if len(f) < 5 or not r:
+            continue
+        rows.append({"dev": f[2], "root": unescape(f[3]), "point": unescape(f[4]),
+                     "fstype": r[0]})  # fmt: skip
+    top = next((m for m in rows if m["point"] == "/"), None)
+    if top is None or top["fstype"] != "btrfs":
+        return None
+    return [(m["root"], m["point"]) for m in rows if m["dev"] == top["dev"]]
+
+
+SUBVOLUME_ROOT_INO = 256  # every subvolume's root folder (BTRFS_FIRST_FREE_OBJECTID)
+
+
+def subvolume_ids(text):
+    """The subvolume ids in `btrfs subvolume list /`: only the ids are read,
+    since its paths are relative to the subvolume asked (D71)."""
+    return [m.group(1) for m in re.finditer(r"^ID (\d+) ", text, re.MULTILINE)]
+
+
+def subvolumes(full_paths, mounts, is_root=None):
+    """(the mount-point path of every subvolume a mount reaches, the names of
+    those none reaches) from each subvolume's full path below the top level
+    (`btrfs inspect-internal subvolid-resolve`) and the mounts. A reached path
+    must really be a subvolume root (`is_root`), else it counts as unreached."""
+    is_root = is_root or (lambda p: os.lstat(p).st_ino == SUBVOLUME_ROOT_INO)
+    reach, unreached = set(), []
+    for full in full_paths:
+        sub = "/" + full.strip().lstrip("/")
+        best = None
+        for root, point in mounts:
+            if under(sub, root) and (best is None or len(root) > len(best[0])):
+                best = (root, point)
+        if best is None:
+            unreached.append(sub.lstrip("/"))
+            continue
+        rest = sub[len(best[0]) :].lstrip("/")
+        path = os.path.join(best[1], rest) if rest else best[1]
+        try:
+            ok = is_root(path)
+        except OSError:
+            ok = False
+        if ok:
+            reach.add(path)
+        else:
+            unreached.append(sub.lstrip("/"))
+    reach |= {point for _, point in mounts}
+    return sorted(reach), sorted(unreached)
+
+
+def row_of(path):
+    """The Usage row a subvolume belongs to, by where it is mounted."""
+    for row, prefix in (("home", "/home"), ("swap", "/swap"), ("snapshots", SNAPSHOTS),
+                        ("var", "/var")):  # fmt: skip
+        if under(path, prefix):
+            return row
+    return "system"
+
+
+def row_args(reach):
+    """The compsize arguments of each Usage row; System is / without /var."""
+    args = {row: [] for row in ROWS}
+    for path in reach:
+        if path == "/":
+            args["system"] += complement("/", ["/var"])
+            args["var"].append("/var")
+        else:
+            args[row_of(path)].append(path)
+    return args
+
+
+def shared(uid, users, home_root=HOME_ROOT):
+    """Why the walk is not the invoking user's alone, or "": another uid owns
+    a folder in /home, or another login user exists (D72)."""
+    try:
+        names = os.listdir(home_root)
+    except OSError:
+        return f"{home_root} is unreadable"
+    for name in names:
+        st = os.lstat(os.path.join(home_root, name))
+        if stat.S_ISDIR(st.st_mode) and st.st_uid not in (uid, 0):
+            return f"another user's folder in {home_root}"
+    for u in users:
+        if (
+            u.pw_uid >= 1000
+            and u.pw_uid not in (uid, 65534)
+            and u.pw_shell not in NO_LOGIN
+        ):
+            return "another login user"
+    return ""
+
+
+# ---- the request ------------------------------------------------------------
+
+
+def plain(path):
+    return (
+        isinstance(path, str)
+        and path.startswith("/")
+        and not path.startswith("//")
+        and "\0" not in path
+        and path == os.path.normpath(path)
+    )
+
+
+def under(path, root):
+    return path == root or path.startswith(root.rstrip("/") + "/")
+
+
+def read_user_file(path, uid, limit, what):
+    """The bytes of `path`, a regular file the user owns of at most `limit`
+    bytes, its folder opened from / one component at a time and the file
+    itself with O_NOFOLLOW; None when it is missing, or a folder on the way is
+    missing or a symlink; Refused for anything else. O_NONBLOCK: a FIFO in its
+    place never stalls the open."""
+    try:
+        dir_fd = open_dir(os.path.dirname(path))
+    except Refused:
+        return None
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    try:
+        fd = os.open(os.path.basename(path), flags, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        raise Refused(f"{what} is not a regular file") from e
+    finally:
+        os.close(dir_fd)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != uid:
+            raise Refused(f"{what} is not the user's own file")
+        # one byte past the limit is enough to know it is over
+        data = os.read(fd, limit + 1)
+    finally:
+        os.close(fd)
+    if len(data) > limit:
+        raise Refused(f"{what} is over {limit >> 20} MiB")
+    return data
+
+
+def read_request(home, uid):
+    """(request, sha256) from the user's state folder, or (None, "") when
+    there is none; Refused for a request the helper will not trust."""
+    data = read_user_file(os.path.join(home, REQUEST), uid, MAX_REQUEST, "the request")
+    if data is None:
+        return None, ""
+    try:
+        doc = json.loads(data)
+    except ValueError as e:
+        raise Refused("the request is not JSON") from e
+    if not isinstance(doc, dict) or doc.get("schema") != 1:
+        raise Refused("the request is not schema 1")
+    cats = doc.get("categories") or {}
+    if not isinstance(cats, dict) or len(cats) > MAX_CATEGORIES:
+        raise Refused("too many categories")
+    paths = sum(len(c.get("paths") or []) for c in cats.values() if isinstance(c, dict))
+    if paths > MAX_PATHS:
+        raise Refused("too many paths")
+    return doc, hashlib.sha256(data).hexdigest()
+
+
+def plugin_check(home, uid, own=__file__):
+    """Why the helper refuses to run, or "": the user's installed plugin must
+    hold a copy of this helper, a regular file they own, read as carefully as
+    the request, whose sha256 is this file's own (D98). A symlink on the way
+    (a dotfiles tool's ~/.config) is refused in its own words, never called
+    removed: the plugin is there, the helper just does not follow links."""
+    path = os.path.join(home, PLUGIN_COPY)
+    try:
+        data = read_user_file(path, uid, MAX_HELPER, "the plugin's copy")
+    except Refused:
+        data = b""
+    if not data:
+        link = symlink_on_the_way(path)
+        if link == path:
+            return (
+                "Kanso Disk Space: the plugin's copy of this helper is a symlink, "
+                "which the helper does not follow"
+            )
+        if link:
+            return (
+                f"Kanso Disk Space: the plugin folder is reached through a symlink "
+                f"({link}), which the helper does not follow"
+            )
+    if data is None:
+        return f"Kanso Disk Space is removed: remove its helper and sudo rule with: {REMOVE}"
+    with open(own, "rb") as f:
+        same = hashlib.sha256(data).digest() == hashlib.sha256(f.read()).digest()
+    if not same:
+        return (
+            "Kanso Disk Space's copy of this helper differs: update it from the "
+            f"card, or remove it with: {REMOVE}"
+        )
+    return ""
+
+
+def symlink_on_the_way(path):
+    """The first component of `path` that is a symlink, or "" (none, or one
+    is missing). It only picks the refusal's words: the refusal itself never
+    depends on it."""
+    d = "/"
+    for part in [p for p in path.split("/") if p]:
+        d = os.path.join(d, part)
+        try:
+            if stat.S_ISLNK(os.lstat(d).st_mode):
+                return d
+        except OSError:
+            return ""
+    return ""
+
+
+def bound_roots(cid, home):
+    """[(root, in the user's home)] a category may measure under."""
+    if cid not in CATEGORY_ROOTS:
+        raise Refused(f"{cid} is not a category the helper measures")
+    out = []
+    for root in CATEGORY_ROOTS[cid]:
+        if root == "~" or root.startswith("~/"):
+            out.append((home + root[1:], True))
+        else:
+            out.append((root, False))
+    return out
+
+
+def checked_paths(cid, paths, home, uid):
+    """The category's paths, each plain, under one of its bound roots, no
+    symlink, the user's own in the home; Refused otherwise."""
+    roots = bound_roots(cid, home)
+    if not isinstance(paths, list) or not paths:
+        raise Refused(f"{cid} has no paths")
+    out = []
+    for p in paths:
+        if not plain(p):
+            raise Refused(f"{cid}: not a plain absolute path")
+        root = next(((r, h) for r, h in roots if under(p, r) and p != r), None)
+        if root is None:
+            raise Refused(f"{cid}: a path outside its roots")
+        try:
+            st = os.lstat(p)
+        except OSError:
+            continue  # gone since the scan: nothing to free
+        if stat.S_ISLNK(st.st_mode):
+            raise Refused(f"{cid}: a symlink")
+        # lstat follows every component but the last: a symlink on the way
+        # is refused here too, never measured as 0 (D84)
+        try:
+            os.close(open_dir(os.path.dirname(p)))
+        except Refused as e:
+            raise Refused(f"{cid}: a symlink on the way") from e
+        if root[1] and st.st_uid != uid:
+            raise Refused(f"{cid}: a path the user does not own")
+        out.append(p)
+    return out
+
+
+def subvolume_of(path, reach):
+    """The reachable subvolume holding `path`: the longest containing it on
+    the same st_dev."""
+    dev = os.lstat(path).st_dev
+    best = None
+    for root in reach:
+        if (
+            under(path, root)
+            and os.lstat(root).st_dev == dev
+            and (best is None or len(root) > len(best))
+        ):
+            best = root
+    if best is None:
+        raise Refused("a path in no reachable subvolume")
+    return best
+
+
+# ---- the whole measurement --------------------------------------------------
+
+
+def measure(reach, unreached, request, home, uid, disk=compsize):
+    """The exact block: Usage rows, their folders, and each category's bytes.
+    `disk(args, fds)` is compsize (a fake in tests)."""
+    out = {"state": "ok", "rows": {}, "children": {}, "unreached": unreached,
+           "categories": {}}  # fmt: skip
+    rows = row_args(reach)
+    cumulative, prev, before = [], 0, {}
+    for row in ROWS:
+        before[row] = (list(cumulative), prev)
+        cumulative += rows[row]
+        total = disk(cumulative)
+        if total is None:
+            return {"state": "incomplete"}
+        out["rows"][row] = max(0, total - prev)
+        prev = total
+    everything = prev
+    out["live_bytes"] = everything - out["rows"]["snapshots"]
+    out["all_bytes"] = everything
+    if request is None:
+        return out
+    out["children"] = children(
+        request.get("children"), before, disk, uid, groups(uid), reach
+    )
+    within, started = {}, time.monotonic()
+    for cid, cat in (request.get("categories") or {}).items():
+        args = (reach, home, uid, everything, within, disk)
+        if isinstance(cat, dict) and cat.get("kept") is True:
+            out["categories"][cid] = kept(cid, cat, home, uid, disk)
+            continue
+        result = category(cid, cat, *args)
+        if result["state"] == "ok" and isinstance(cat.get("each"), list):
+            result["each"] = each(cid, cat, args, started)
+        out["categories"][cid] = result
+    return out
+
+
+def each(cid, cat, args, started, clock=time.monotonic):
+    """What deleting each named folder alone frees, by the category's own
+    method (D99): only the category's own paths, at most MAX_EACH, and none
+    started once the run is EACH_BUDGET seconds old, so a slow disk is never
+    pushed into a timeout. A folder not reached is left out, never guessed."""
+    out = {}
+    for p in cat["each"][:MAX_EACH]:
+        if clock() - started > EACH_BUDGET:
+            break
+        if p not in cat["paths"]:
+            continue
+        r = category(cid, {"frees": cat.get("frees"), "paths": [p]}, *args)
+        if r["state"] == "ok":
+            out[p] = {"now_bytes": r["now_bytes"], "after_bytes": r["after_bytes"]}
+    return out
+
+
+def kept(cid, cat, home, uid, disk):
+    """A category the report shows but never offers (core dumps): its own
+    on-disk bytes, every extent once (D104)."""
+    pins = Pins()
+    try:
+        paths = checked_paths(cid, cat.get("paths"), home, uid)
+        size = disk([pins.arg(p) for p in paths], pins.fds())
+        if size is None:
+            return {"state": "timeout"}
+        return {"state": "ok", "size_bytes": size}
+    except Refused as e:
+        return {"state": "refused", "reason": str(e)}
+    finally:
+        pins.close()
+
+
+def grants(st, uid, gids):
+    """Whether st's mode gives the user read and search, as the kernel picks
+    the class: owner, else group, else other."""
+    if st.st_uid == uid:
+        return st.st_mode & 0o500 == 0o500
+    if st.st_gid in gids:
+        return st.st_mode & 0o050 == 0o050
+    return st.st_mode & 0o005 == 0o005
+
+
+def openable(path, root, uid, gids, own):
+    """Whether the user could open `path` themselves (D81): a directory at
+    most three levels below its row root (D82), every directory on the way
+    (the root aside) one they may read and search; in the home row, each
+    their own."""
+    rel = os.path.relpath(path, root).split(os.sep)
+    if len(rel) > 3 or ".." in rel:
+        return False
+    d = root
+    for part in rel:
+        d = os.path.join(d, part)
+        try:
+            st = os.lstat(d)
+        except OSError:
+            return False
+        if not stat.S_ISDIR(st.st_mode) or (own and st.st_uid != uid):
+            return False
+        if not grants(st, uid, gids):
+            return False
+    return True
+
+
+def groups(uid):
+    """The user's group ids: their primary group and every one listing them."""
+    try:
+        pw = pwd.getpwuid(uid)
+    except KeyError:
+        return set()
+    return set(os.getgrouplist(pw.pw_name, pw.pw_gid))
+
+
+def children(wanted, before, disk, uid, gids, reach=()):
+    """Each named folder's on-disk bytes within its row's attribution (what
+    it adds to the rows before it), so a folder never exceeds its row. Only a
+    folder the user could open themselves; any other is skipped (D81). A
+    subvolume mounted inside the folder (/var/cache/pacman/pkg is @pkg) is
+    measured with it, since compsize -x stops at it; the folder is skipped if
+    the user could not open that subvolume's root (D82)."""
+    out = {}
+    if not isinstance(wanted, dict):
+        return out
+    count = 0
+    for row, paths in wanted.items():
+        if row not in ROW_ROOTS or not isinstance(paths, list):
+            continue
+        base_args, base = before[row]
+        for p in paths:
+            if count >= MAX_CHILDREN:
+                return out
+            count += 1
+            if not plain(p) or not under(p, ROW_ROOTS[row]) or p == ROW_ROOTS[row]:
+                continue
+            if not openable(p, ROW_ROOTS[row], uid, gids, row == "home"):
+                continue
+            inside = [s for s in reach if under(s, p) and s != p and row_of(s) == row]
+            if not all(
+                openable(s, ROW_ROOTS[row], uid, gids, row == "home") for s in inside
+            ):
+                continue
+            pins = Pins()
+            try:
+                total = disk(
+                    base_args + [pins.arg(x) for x in [p, *inside]], pins.fds()
+                )
+            except Refused:
+                continue
+            finally:
+                pins.close()
+            if total is not None:
+                out[p] = max(0, total - base)
+    return out
+
+
+def category(cid, cat, reach, home, uid, everything, within, disk):
+    if not isinstance(cat, dict):
+        return {"state": "refused", "reason": "not an object"}
+    pins = Pins()
+    try:
+        paths = checked_paths(cid, cat.get("paths"), home, uid)
+        if not paths:
+            return {"state": "ok", "now_bytes": 0, "after_bytes": None}
+        root = subvolume_of(paths[0], reach)
+        if any(subvolume_of(p, reach) != root for p in paths):
+            raise Refused("paths in two subvolumes")
+        rest = [pins.arg(p) for p in complement(root, paths)]
+        others = [r for r in reach if r != root]
+        without = disk(others + rest, pins.fds())
+        if without is None:
+            return {"state": "timeout"}
+        # a difference under 0 is run-to-run churn (D69)
+        result = {"state": "ok", "now_bytes": max(0, everything - without),
+                  "after_bytes": None}  # fmt: skip
+        if cat.get("frees") == "after updates":
+            if root not in within:
+                within[root] = disk([root])
+            alone = disk(rest, pins.fds())
+            if within[root] is not None and alone is not None:
+                result["after_bytes"] = max(0, within[root] - alone)
+        return result
+    except Refused as e:
+        return {"state": "refused", "reason": str(e)}
+    finally:
+        pins.close()
+
+
+def subvolume_paths():
+    """Every subvolume's full path below the top level, or None when btrfs
+    will not say: ids from `subvolume list`, each resolved by id."""
+
+    def btrfs(*args):
+        p = subprocess.run([BTRFS, *args], capture_output=True, text=True, check=False,
+                           timeout=60, stdin=subprocess.DEVNULL)  # fmt: skip
+        return p.stdout if p.returncode == 0 else None
+
+    listed = btrfs("subvolume", "list", "/")
+    if listed is None:
+        return None
+    out = []
+    for sid in subvolume_ids(listed):
+        path = btrfs("inspect-internal", "subvolid-resolve", sid, "/")
+        if path is None:
+            return None
+        out.append(path.strip())
+    return out
+
+
+def snapshot_count(reach):
+    return sum(1 for p in reach if row_of(p) == "snapshots" and p != SNAPSHOTS)
+
+
+def invoker():
+    """(uid, home folder) of the user sudo ran this for (SUDO_UID, which sudo
+    sets itself), or (None, "")."""
+    sudo_uid = os.environ.get("SUDO_UID", "")
+    if not sudo_uid.isdigit():
+        return None, ""
+    try:
+        return int(sudo_uid), pwd.getpwuid(int(sudo_uid)).pw_dir
+    except KeyError:
+        return None, ""
+
+
+def main(argv):
+    if len(argv) > 1:
+        print("kanso-disk-measure takes no arguments", file=sys.stderr)
+        return 2
+    out = {"schema": 2, "measured_at": int(time.time()), "supported": False}
+    try:
+        with open(MOUNTINFO, encoding="utf-8") as f:
+            mounts = btrfs_mounts(f.read())
+    except OSError:
+        mounts = None
+    tools = os.access(COMPSIZE, os.X_OK) and os.access(BTRFS, os.X_OK)
+    if os.geteuid() != 0 or not mounts or not tools:
+        print(json.dumps(out))
+        return 0
+    uid, home = invoker()
+    if uid is None:
+        print("kanso-disk-measure runs only through sudo", file=sys.stderr)
+        return 2
+    refusal = plugin_check(home, uid)
+    if refusal:
+        print(refusal, file=sys.stderr)
+        return 3
+    full = subvolume_paths()
+    if full is None:
+        print(json.dumps(out))
+        return 0
+    reach, unreached = subvolumes(full, mounts)
+    out.update(supported=True, snapshots=snapshot_count(reach))
+    why = shared(uid, pwd.getpwall())
+    request, sha = None, ""
+    if not why:
+        try:
+            request, sha = read_request(home, uid)
+        except Refused as e:
+            why = str(e)
+    if why:
+        # the snapshot figure alone: / and then with them
+        live = compsize(["/"])
+        every = compsize(["/", *[p for p in reach if row_of(p) == "snapshots"]])
+        exact = {"state": "refused", "reason": why}
+    else:
+        exact = measure(reach, unreached, request, home, uid)
+        live, every = exact.pop("live_bytes", None), exact.pop("all_bytes", None)
+    out["complete"] = isinstance(live, int) and isinstance(every, int)
+    if out["complete"]:
+        out.update(root_bytes=live, all_bytes=every, only_bytes=max(0, every - live))
+    out["exact"] = exact
+    out["request_sha256"] = sha
+    # a pass that ran out of time: the disk too slow for the limit (D101)
+    out["timed_out"] = bool(TIMED_OUT)
+    print(json.dumps(out))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

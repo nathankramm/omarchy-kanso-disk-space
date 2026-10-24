@@ -1,0 +1,437 @@
+#!/usr/bin/env bash
+# The right-click menu and every notification click (§8.7).
+#
+#   kanso-disk-space ask [boot|readonly]
+#                           write the report, then open the default coding agent
+#                           on it with the disk-cleanup skill (as omarchy-agent-crash);
+#                           Claude starts in plan mode (D33). A topic is a
+#                           warning's Ask agent: /boot nearly full (D123), a
+#                           read-only disk (D124)
+#   kanso-disk-space details  the kernel's log lines about the disk to the
+#                           clipboard: the read-only panel's Copy details (D124)
+#   kanso-disk-space readme <section>  the README at a section, in a terminal:
+#                           symlinks · other-users · exact-sizes · settings (D122)
+#   kanso-disk-space copy   the Markdown report to the clipboard (wl-copy)
+#   kanso-disk-space save   the report to ~/Documents/disk-space-YYYY-MM-DD.md
+#   kanso-disk-space menu   Omarchy's menu: Ask agent · Copy report · Save report,
+#                           and Remove exact sizes while the helper is installed
+#   kanso-disk-space measure-install     opt in to the read-only exact measure
+#                                        in a terminal, every step through sudo
+#   kanso-disk-space measure-uninstall   take it out again (D56)
+#   kanso-disk-space setup               the card's Set up button (D80): the same
+#                                        steps as root through pkexec (Omarchy's
+#                                        polkit dialog, no terminal). Exit 0 done,
+#                                        10 cancelled, 11 needs an administrator,
+#                                        12 continued in a terminal, 1 failed
+#   kanso-disk-space remove              the menu's Remove exact sizes (D105):
+#                                        measure-uninstall's two removals as root
+#                                        through pkexec, as setup; compsize stays
+#
+# The engine writes every report file itself, atomically (report --out), so
+# this script never makes or removes a file. KANSO_DISK_ENGINE and
+# KANSO_DISK_PYTHON override the engine and its interpreter (tests).
+set -uo pipefail
+
+# setup's root half resolves every tool by name: never out of the caller's
+# PATH (as omarchy-theme-set-browser-policy)
+if ((EUID == 0)); then
+  export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin
+fi
+
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+plugin=$(cd "$here/.." && pwd)
+engine=${KANSO_DISK_ENGINE:-$plugin/python/disk_space.py}
+# The system Python, not a `python3` on PATH that may be an older mise/pyenv
+# shim (the engine needs 3.11+ for tomllib).
+python=${KANSO_DISK_PYTHON:-/usr/bin/python3}
+state=${XDG_STATE_HOME:-$HOME/.local/state}/kanso-disk-space
+skill=$plugin/agents/skills/disk-cleanup/SKILL.md
+
+# --app-name and -u always: the default app name, omarchy-action, would break
+# through Do Not Disturb. The drive glyph on every toast, as the level toasts
+# carry it (D66).
+# U+F0A0 as UTF-8 bytes: $'\u…' needs a UTF-8 locale, and a launch may have none
+glyph=$'\xef\x82\xa0'
+notify() {
+  omarchy-notification-send --app-name "Kanso Disk Space" -u normal -g "$glyph" "$@" >/dev/null 2>&1 || true
+}
+
+# One short reason on the toast; the whole error goes to the journal (D66).
+fail() {
+  local reason=$1 detail=${2:-}
+  [[ -n $detail ]] && logger -t kanso-disk-space -- "$detail" 2>/dev/null
+  notify "Report failed" "$reason${detail:+ Details: journalctl -t kanso-disk-space}"
+  exit 1
+}
+
+# The engine's error, as one short reason a toast can hold.
+reason_of() {
+  case "$1" in
+    *"No space left"*) echo "The disk is full." ;;
+    *"Permission denied"*) echo "Permission denied." ;;
+    *) echo "The report could not be written." ;;
+  esac
+}
+
+# The engine's last line of complaint.
+engine_report() {
+  local err
+  if ! err=$("$python" "$engine" report "$@" 2>&1 >/dev/null); then
+    err=$(printf '%s' "${err:-the engine failed}" | tail -n 1)
+    fail "$(reason_of "$err")" "$err"
+  fi
+}
+
+ask() {
+  local path prompt goal topic=()
+  case "${1:-}" in
+    boot | readonly) topic=(--topic "$1") ;;
+  esac
+  # Ask agent counts as seen: the reclaimable now becomes the review baseline
+  # (D58). A failure here never stops the hand-off.
+  "$python" "$engine" seen >/dev/null 2>&1 || true
+  path="$state/report-$(date +%Y-%m-%dT%H%M%S).md"
+  engine_report --md --out "$path"
+  # the goal by level or by the warning's topic, in the card's figures, and
+  # the report's detail mode (D89, D123, D124, D127)
+  goal=$("$python" "$engine" report --goal "${topic[@]}" 2>/dev/null) ||
+    goal="I want to review the disk space on this Omarchy machine and clean up only what I approve."
+  prompt=$(
+    cat <<PROMPT
+$goal
+Read the report at $path and follow the disk-cleanup skill:
+  $skill
+If your harness has no skill mechanism, read that file directly and follow it.
+PROMPT
+  )
+  open_agent "$prompt"
+}
+
+# Claude starts in plan mode: it reads and proposes, and runs nothing until
+# the user approves the plan (D33). omarchy-agent always passes Claude
+# --permission-mode auto, so for Claude this launches it the way omarchy-agent
+# does: the same window class, the same account home, and ~/Work instead of
+# $HOME (Claude never remembers trust for $HOME). Every other agent goes
+# through omarchy-agent.
+open_agent() {
+  local prompt=$1 home launch=()
+  if [[ $(omarchy-default-agent 2>/dev/null) != claude ]] || ! command -v claude >/dev/null; then
+    exec omarchy-agent --prompt "$prompt"
+  fi
+  if [[ -v OMARCHY_AGENT_CLAUDE_HOME && ${CLAUDE_CONFIG_DIR:-} == "$OMARCHY_AGENT_CLAUDE_HOME" ]]; then
+    unset CLAUDE_CONFIG_DIR
+  fi
+  unset OMARCHY_AGENT_CLAUDE_HOME
+  [[ $PWD == "$HOME" && -d $HOME/Work ]] && cd "$HOME/Work"
+  if [[ -z ${CLAUDE_CONFIG_DIR:-} ]]; then
+    home=$(omarchy-agent-account-home claude 2>/dev/null)
+    launch=(env -u CLAUDE_CONFIG_DIR "OMARCHY_AGENT_CLAUDE_HOME=$home")
+    [[ -n $home ]] && launch+=("CLAUDE_CONFIG_DIR=$home")
+  fi
+  exec omarchy-launch-tui --app-id=org.omarchy.agent "${launch[@]}" claude --permission-mode plan -- "$prompt"
+}
+
+# The kernel's lines about the disk, for whoever checks it (D124): journalctl
+# -k reads them as a wheel or adm member (journal ACL); dmesg needs
+# kernel.dmesg_restrict=0. Neither: the clipboard says how to get them.
+disk_lines='btrfs|BTRFS|EXT4-fs|ext4|XFS|I/O error|read-only|remount|blk_update_request|critical medium error|nvme[0-9]+.*(error|timeout|reset)|ata[0-9]+.*(error|failed)'
+details() {
+  local lines="" src=""
+  lines=$(journalctl -k -b --no-pager -o short-iso 2>/dev/null | grep -E "$disk_lines" |
+    grep -v 'Write protecting' | tail -n 80)
+  [[ -n $lines ]] && src="journalctl -k -b"
+  if [[ -z $lines ]]; then
+    lines=$(dmesg 2>/dev/null | grep -E "$disk_lines" | grep -v 'Write protecting' | tail -n 80)
+    [[ -n $lines ]] && src="dmesg"
+  fi
+  if [[ -z $lines ]]; then
+    printf '%s\n' "No kernel log lines about the disk were readable as $(id -un)." \
+      "Run this in a terminal to see them: sudo dmesg | grep -E '$disk_lines'" | wl-copy ||
+      fail "The clipboard refused it."
+    notify "No kernel lines readable" "On the clipboard: the command that shows them"
+    return
+  fi
+  printf '%s\n' "Kernel log lines about the disk ($src, this boot):" "$lines" | wl-copy ||
+    fail "The clipboard refused it."
+  local n word=lines
+  n=$(wc -l <<<"$lines")
+  ((n == 1)) && word=line
+  notify "Details copied" "$n kernel log $word on the clipboard"
+}
+
+# The README the plugin ships, at one section, in Omarchy's floating terminal
+# (D122): less opens on the section's heading.
+readme() {
+  local heading
+  case "${1:-}" in
+    symlinks) heading="Symlinked plugin folder" ;;
+    other-users) heading="Other login users" ;;
+    exact-sizes) heading="Exact sizes" ;;
+    settings) heading="Settings" ;;
+    *) heading="" ;;
+  esac
+  exec omarchy-launch-tui --app-id=org.omarchy.terminal less -R "+/^## $heading" "$plugin/README.md"
+}
+
+copy_report() {
+  local text
+  # on failure, run it once more for its error: no file is made for it
+  if ! text=$("$python" "$engine" report --md 2>/dev/null); then
+    engine_report --md
+    fail "The report could not be written."
+  fi
+  printf '%s\n' "$text" | wl-copy || fail "The clipboard refused it."
+  # a body like the other toasts', so it has their size and icon (D68)
+  notify "Report copied" "On the clipboard as Markdown"
+}
+
+save_report() {
+  local dir="$HOME/Documents" name
+  name="disk-space-$(date +%F).md"
+  mkdir -p "$dir" || fail "Cannot create ~/Documents."
+  engine_report --md --out "$dir/$name"
+  # relative to home: a full path breaks mid-word in the toast (D66)
+  notify "Report saved" "Documents/$name"
+}
+
+# ---- the exact measure's setup (D53, D56, D80) --------------------------
+# measure-install prints every step first and runs nothing under sudo before
+# a yes; setup runs the same steps after Omarchy's polkit dialog.
+helper_src=$plugin/bin/kanso-disk-measure
+helper_dest=/usr/local/libexec/kanso-disk-measure
+rule_dest=/etc/sudoers.d/kanso-disk-measure
+
+confirm() {
+  local answer
+  read -r -p "${1:-Proceed?} [y/N] " answer
+  [[ $answer == y || $answer == Y ]]
+}
+
+measure_tmp=""
+
+# The name goes into a sudoers line: a plain login name only.
+plain_user() {
+  [[ $1 =~ ^[a-z_][a-z0-9_-]*$ ]]
+}
+
+rule_of() {
+  echo "$1 ALL=(root) NOPASSWD: $helper_dest \"\""
+}
+
+# The reviewed steps, shared by measure-install and setup's root half (D80):
+# each runs through "$@" (sudo, or nothing as root, or the test recorder).
+# $measure_tmp holds the rule; pacman_flags is --noconfirm without a terminal.
+pacman_flags=()
+install_steps() {
+  "$@" pacman -S --needed "${pacman_flags[@]}" compsize btrfs-progs python &&
+    "$@" install -d -o root -g root -m 0755 /usr/local/libexec &&
+    "$@" install -o root -g root -m 0755 "$helper_src" "$helper_dest" &&
+    "$@" visudo -cf "$measure_tmp" &&
+    "$@" install -o root -g root -m 0440 "$measure_tmp" "$rule_dest"
+}
+
+rule_file() {
+  # global, not local: the EXIT trap runs after the caller has returned
+  measure_tmp=$(mktemp)
+  trap 'rm -f "$measure_tmp"' EXIT # own-file: the temp sudoers rule
+  printf '%s\n' "$1" >"$measure_tmp"
+}
+
+measure_install() {
+  local user
+  user=$(id -un)
+  if ! plain_user "$user"; then
+    echo "refusing: the user name '$user' is not a plain login name" >&2
+    exit 1
+  fi
+  local rule
+  rule=$(rule_of "$user")
+  cat <<STEPS
+This installs Kanso Disk Space's read-only exact measure for $user:
+  1. sudo pacman -S --needed compsize btrfs-progs python
+  2. sudo install -d -o root -g root -m 0755 /usr/local/libexec
+  3. sudo install -o root -g root -m 0755 $helper_src $helper_dest
+  4. the sudoers rule, written to a temp file:
+       $rule
+     checked with:  sudo visudo -cf <temp file>
+     then:          sudo install -o root -g root -m 0440 <temp file> $rule_dest
+  5. a test run:    sudo -n $helper_dest
+The helper takes no arguments, only reads, and prints one line of numbers.
+It measures the paths the last scan found (its request file, D72), and
+nothing exact when another login user exists.
+STEPS
+  confirm || exit 0
+  rule_file "$rule"
+  install_steps sudo || {
+    echo "stopped: nothing after the failed step was done" >&2
+    exit 1
+  }
+  echo "installed:  $(sha256sum "$helper_dest" | cut -d' ' -f1)"
+  echo "plugin copy: $(sha256sum "$helper_src" | cut -d' ' -f1)"
+  echo "test run (takes a minute at low priority):"
+  sudo -n "$helper_dest"
+}
+
+# Tests only: the root half run as the user records each step instead of
+# running it. pkexec clears the environment, so a real run never gets here.
+dry_root() {
+  printf '%s\n' "$*" >>"$KANSO_DISK_TEST_ROOT_LOG"
+  if [[ $1 == visudo ]]; then
+    cat "$3" >>"$KANSO_DISK_TEST_ROOT_LOG"
+    [[ ${KANSO_DISK_TEST_VISUDO:-ok} == ok ]]
+  fi
+}
+
+# The root half (D80): the user is the one pkexec authenticated for, never an
+# argument; the steps are measure-install's, unattended.
+setup_root() {
+  local runner=()
+  if ((EUID != 0)); then
+    if [[ ${KANSO_DISK_TESTING:-} != 1 ]]; then
+      echo "setup-root runs only as root, through pkexec" >&2
+      exit 1
+    fi
+    runner=(dry_root)
+  fi
+  local uid=${PKEXEC_UID:-} user
+  if [[ ! $uid =~ ^[0-9]+$ ]] || ((uid == 0)); then
+    echo "setup-root: no user to set up for (PKEXEC_UID)" >&2
+    exit 1
+  fi
+  user=$(id -nu "$uid") || exit 1
+  if ! plain_user "$user"; then
+    echo "refusing: the user name '$user' is not a plain login name" >&2
+    exit 1
+  fi
+  # an administrator only (D72's premise; polkit's admin group on Arch): an
+  # admin authenticating for another user never gives that user the rule
+  local admin=wheel
+  ((${#runner[@]})) && admin=${KANSO_DISK_TEST_ADMIN_GROUP:-wheel}
+  if [[ " $(id -nG "$user") " != *" $admin "* ]]; then
+    echo "setup-root: $user is not an administrator ($admin)" >&2
+    exit 11
+  fi
+  rule_file "$(rule_of "$user")"
+  pacman_flags=(--noconfirm)
+  install_steps "${runner[@]}" || {
+    echo "stopped: nothing after the failed step was done" >&2
+    exit 1
+  }
+}
+
+# The user half: Omarchy's polkit dialog, else a terminal (no agent), else a
+# reason the card can show. The engine scans once this returns 0.
+in_terminal() {
+  omarchy-launch-floating-terminal-with-presentation "$here/kanso-disk-space measure-install" >/dev/null 2>&1 &
+  exit 12
+}
+
+setup() {
+  local err code
+  command -v pkexec >/dev/null || in_terminal
+  err=$(pkexec "$here/kanso-disk-space" setup-root 2>&1 >/dev/null)
+  code=$?
+  case $code in
+    0) return 0 ;;
+    11) exit 11 ;;  # the user is not an administrator (setup-root)
+    126) exit 10 ;; # the dialog was dismissed
+    127)
+      [[ $err == *"No authentication agent"* ]] && in_terminal
+      exit 11 # not authorized: the user is not an administrator
+      ;;
+  esac
+  logger -t kanso-disk-space -- "setup failed ($code): ${err:-no output}" 2>/dev/null
+  exit 1
+}
+
+# The menu's Remove exact sizes (D105): measure-uninstall's two removals,
+# unattended, as root through the same polkit dialog as setup; compsize stays
+# (other tools may use it). The outcome is a toast: the menu has no window.
+remove_root() {
+  local runner=()
+  if ((EUID != 0)); then
+    if [[ ${KANSO_DISK_TESTING:-} != 1 ]]; then
+      echo "remove-root runs only as root, through pkexec" >&2
+      exit 1
+    fi
+    runner=(dry_root)
+  fi
+  "${runner[@]}" rm -f "$rule_dest" &&  # own-file: the rule measure-install put there
+    "${runner[@]}" rm -f "$helper_dest" # own-file: the helper measure-install put there
+}
+
+remove_exact() {
+  local err code
+  if ! command -v pkexec >/dev/null; then
+    omarchy-launch-floating-terminal-with-presentation "$here/kanso-disk-space measure-uninstall" >/dev/null 2>&1 &
+    exit 0
+  fi
+  err=$(pkexec "$here/kanso-disk-space" remove-root 2>&1 >/dev/null)
+  code=$?
+  case $code in
+    0) notify "Exact sizes removed" "The helper and its sudo rule are gone" ;;
+    126) notify "Removal cancelled" "Nothing was removed" ;;
+    127)
+      if [[ $err == *"No authentication agent"* ]]; then
+        omarchy-launch-floating-terminal-with-presentation "$here/kanso-disk-space measure-uninstall" >/dev/null 2>&1 &
+        exit 0
+      fi
+      notify "Removal needs an administrator" "Nothing was removed"
+      ;;
+    *)
+      logger -t kanso-disk-space -- "remove failed ($code): ${err:-no output}" 2>/dev/null
+      notify "Removal failed" "Details: journalctl -t kanso-disk-space"
+      exit 1
+      ;;
+  esac
+}
+
+measure_uninstall() {
+  echo "This removes the exact measure:"
+  echo "  1. sudo rm $rule_dest"   # own-file: printed, the rule measure-install put there
+  echo "  2. sudo rm $helper_dest" # own-file: printed, the helper measure-install put there
+  echo "compsize stays unless you say so next."
+  confirm || exit 0
+  sudo rm "$rule_dest"   # own-file: the rule measure-install put there
+  sudo rm "$helper_dest" # own-file: the helper measure-install put there
+  if confirm "Also remove compsize (sudo pacman -Rs compsize)?"; then
+    sudo pacman -Rs compsize
+  fi
+}
+
+# Whether the exact measure is installed, for the menu; the test suite's
+# stand-in path, as the engine's (measure.py), never the real one in a test.
+installed_helper=$helper_dest
+if [[ ${KANSO_DISK_TESTING:-} == 1 && -n ${KANSO_DISK_TEST_MEASURE_INSTALLED:-} ]]; then
+  installed_helper=$KANSO_DISK_TEST_MEASURE_INSTALLED
+fi
+
+case "${1:-menu}" in
+  menu)
+    items=("Ask agent" "Copy report" "Save report")
+    [[ -e $installed_helper ]] && items+=("Remove exact sizes")
+    choice=$(omarchy-menu-select "Disk space" "${items[@]}") || exit 0
+    case "$choice" in
+      "Ask agent") ask ;;
+      "Copy report") copy_report ;;
+      "Save report") save_report ;;
+      "Remove exact sizes") remove_exact ;;
+      *) exit 0 ;;
+    esac
+    ;;
+  ask) ask "${2:-}" ;;
+  details) details ;;
+  readme) readme "${2:-}" ;;
+  copy) copy_report ;;
+  save) save_report ;;
+  measure-install) measure_install ;;
+  measure-uninstall) measure_uninstall ;;
+  setup) setup ;;
+  setup-root) setup_root ;;
+  remove) remove_exact ;;
+  remove-root) remove_root ;;
+  *)
+    echo "usage: kanso-disk-space ask [boot|readonly]|details|readme <section>|copy|save|menu|measure-install|measure-uninstall|setup|remove" >&2
+    exit 2
+    ;;
+esac

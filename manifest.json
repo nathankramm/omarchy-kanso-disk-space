@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.nathankramm.kanso-disk-space",
+  "name": "Kanso Disk Space",
+  "version": "1.0.0",
+  "author": "nathankramm",
+  "license": "MIT",
+  "description": "Exact disk space for the bar: where every byte went, what's safe to clean, and when you'll run low. Quiet until it matters.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "qml/Service.qml",
+    "barWidget": "qml/BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Kanso Disk Space",
+    "description": "Free space on /, quiet until it matters",
+    "category": "System",
+    "aliases": ["disk", "disk-space", "storage"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "watchGiB": 50,
+      "lowGiB": 30,
+      "criticalGiB": 15,
+      "slowHorizonDays": 14,
+      "notifications": true,
+      "numberOnBar": true,
+      "totalsOnly": false
+    },
+    "schema": [
+      { "key": "watchGiB", "type": "integer", "label": "Watch below (GiB)", "min": 12, "max": 1000, "step": 1, "defaultValue": 50 },
+      { "key": "lowGiB", "type": "integer", "label": "Low below (GiB)", "min": 11, "max": 1000, "step": 1, "defaultValue": 30 },
+      { "key": "criticalGiB", "type": "integer", "label": "Critical below (GiB)", "min": 11, "max": 1000, "step": 1, "defaultValue": 15, "description": "Updates are blocked below 10 GiB; that line is Omarchy's and is not a setting." },
+      { "key": "slowHorizonDays", "type": "integer", "label": "Warn when Critical is this many days away", "min": 1, "max": 60, "step": 1, "defaultValue": 14 },
+      { "key": "notifications", "type": "boolean", "label": "Notifications", "defaultValue": true },
+      { "key": "numberOnBar", "type": "boolean", "label": "Show free GiB on the bar from Watch on", "defaultValue": true },
+      { "key": "totalsOnly", "type": "boolean", "label": "Agent report: totals only", "defaultValue": false, "description": "For cloud agents: the report keeps category totals and official commands, and names no folder or file inside them." }
+    ]
+  }
+}
