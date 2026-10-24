@@ -59,16 +59,20 @@ name. Never show a name as a link or an image. A name the report marks
    category, never bundled ("System logs + empty the Trash" is two choices).
    For a category with many folders (App caches), offer one choice per
    folder, each with the exact figure the report gives it ("frees …") and its
-   own command and undo; a folder with no figure says so. Run its dry run,
-   show the result, then run the real command.
+   own command and undo; a folder with no figure says so. For App caches in
+   ~/.config, offer one choice per app with its "App" line's figure (or "not
+   measured"), and move all of that app's folders. Run its dry run, show the
+   result, then run the real command.
 3. **Absolute paths only.** No `rm -rf`, no globs, no `~` or `$HOME` in any
    delete. User files go to the Trash with `gio trash <absolute path>`.
 4. **Use each category's own Real command** from the report (`paccache`,
-   `docker builder prune`, `ollama rm`, `journalctl --vacuum-size`, `mise
-   prune --tools`, a cache's own cleaner such as `uv cache clean`, or `gio
-   trash <absolute path>` where the report gives it, as for the AUR build
-   folders), never a hand-rolled delete of a directory a tool manages. For a
+   `docker builder prune --force`, `ollama rm`, `journalctl --vacuum-size`,
+   `mise prune --tools --yes`, a cache's own cleaner such as `uv cache
+   clean`, or `gio trash <absolute path>` where the report gives it, as for
+   the AUR build folders), never a hand-rolled delete of a directory a tool manages. For a
    cache folder, use the command the report names for that folder.
+   Run each real command once and read its own output for errors: never
+   again to count or check what it did (rule 5 measures that).
 5. **Re-measure after each step:** run `btrfs filesystem sync /` (no sudo),
    then `df --output=avail --block-size=1 /`. Sync before every `df` reading,
    the one you compare against included: btrfs returns deleted space only

@@ -20,6 +20,7 @@ import re
 import shlex
 
 import categories
+import devcaches
 import health
 import levels
 import mounts
@@ -608,10 +609,23 @@ def category_md(c):
         lines.append(
             f"  - {c['left_out']} {plural(c['left_out'], 'name')} left out (totals only)"
         )
+    if c["id"] == "electron-caches":
+        # the figure the user chooses an app by (D142)
+        for app, figure in devcaches.app_figures(c):
+            lines.append(
+                f"- App {name(app)}: frees {size(figure)}, each of its folders measured "
+                "alone"
+                if figure is not None
+                else f"- App {name(app)}: not measured"
+            )
     for argv in c["commands"]["dry_run"]:
         lines.append(f"- Dry run: {cmd(argv)}")
     for argv in c["commands"]["real"]:
-        lines.append(f"- Real: {cmd(argv)}")
+        # sudo always asks for a password, which an agent cannot type (D141)
+        hand = (
+            " (sudo asks for a password: the user runs it)" if argv[0] == "sudo" else ""
+        )
+        lines.append(f"- Real: {cmd(argv)}{hand}")
     if c["commands"].get("left_out"):
         n = c["commands"]["left_out"]
         lines.append(

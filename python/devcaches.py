@@ -358,19 +358,22 @@ def electron_caches(ctx):
     """Every allow-listed cache folder, running apps' too: measuring is
     read-only, so the row's figure is exact for all of them; while an app
     runs the row says to close it first and the report tells the agent to
-    wait (D134)."""
+    wait (D134). Whole apps, largest first, have their folders measured
+    alone, up to EACH folders in all, so an app gets a figure (D142)."""
     config = os.path.join(ctx.home, ".config")
-    busy, paths, items = [], [], []
+    busy, paths, items, apps = [], [], [], []
     for app, folder, caches in electron_apps(config):
         caches = [c for c in caches if not filenames.unusual(c)]
-        if not caches or size_of(ctx, caches) == 0:
+        sizes = [size_of(ctx, [c]) for c in caches]
+        if not caches or sum(sizes) == 0:
             continue
         running_now = running(folder)
         if running_now:
             busy.append(app)
         paths += caches
-        for c in caches:
-            item = {"path": c, "real": [*TRASH, c]}
+        apps.append((-sum(sizes), folder, caches))
+        for c, size in zip(caches, sizes):
+            item = {"path": c, "bytes": size, "app": app_name(app), "real": [*TRASH, c]}
             if running_now:
                 item.update(waiting=True, name=app_name(app))
             items.append(item)
@@ -383,7 +386,7 @@ def electron_caches(ctx):
         "electron-caches", ctx, folder=config, bytes=total, reclaimable=total,
         frees=ctx.frees(config), undo="rebuilds as the app runs; it may start slower once",
         qualifier=qualifier, items=items, measure_paths=sorted(paths),
-        waiting=waiting_text(busy),
+        each=whole_apps(apps), waiting=waiting_text(busy),
         commands={"dry_run": [["du", "-sh", "--", c] for c in paths],
                   "real": [[*TRASH, c] for c in paths]},
         note=("Only Chromium's cache folders (" + ", ".join(ELECTRON_CACHES) + "), never "
@@ -391,3 +394,27 @@ def electron_caches(ctx):
               "moved only once it is closed. Moved to the Trash, they free once it is "
               "emptied."),
     )  # fmt: skip
+
+
+def whole_apps(apps):
+    """The folders measured alone (D142): every folder of the largest apps
+    that fit within EACH, so no app is left with half its folders measured;
+    an app that does not fit is skipped for a smaller one."""
+    each = []
+    for _, _, caches in sorted(apps):
+        if len(each) + len(caches) <= categories.EACH:
+            each += caches
+    return each
+
+
+def app_figures(c):
+    """[(app, what its caches free or None)] in the row's order: the sum of
+    its folders' figures, each measured alone, when every one of them was;
+    else None, "not measured" (D142)."""
+    out = {}
+    for item in c.get("items") or []:
+        app = item.get("app") or os.path.basename(os.path.dirname(item["path"]))
+        figure = out.get(app, 0)
+        out[app] = (None if figure is None or "frees_bytes" not in item
+                    else figure + item["frees_bytes"])  # fmt: skip
+    return list(out.items())

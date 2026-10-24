@@ -368,7 +368,8 @@ def mise_versions(ctx):
         qualifier=f"{n} old version{'s' if n != 1 else ''}",
         commands={
             "dry_run": [["mise", "prune", "--dry-run", "--tools"]],
-            "real": [["mise", "prune", "--tools"]],
+            # --yes: without a terminal mise stops for confirmation (D141)
+            "real": [["mise", "prune", "--tools", "--yes"]],
         },
         note=(
             "Versions no config file or running program uses. Omarchy's updates "
@@ -618,8 +619,9 @@ def docker(ctx, socket="/var/run/docker.sock"):
         commands={
             "dry_run": [["docker", "system", "df", "-v"]],
             "real": [
-                ["docker", "builder", "prune"],
-                ["docker", "image", "prune", "-a"],
+                # --force: each prune asks [y/N] otherwise (D141)
+                ["docker", "builder", "prune", "--force"],
+                ["docker", "image", "prune", "-a", "--force"],
             ],
         },
     )
