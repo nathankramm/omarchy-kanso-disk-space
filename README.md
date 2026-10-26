@@ -5,7 +5,7 @@ gates on it: what's free, where the space went, what you can safely clean, and
 when you'll run low. Quiet until it matters. Every size is measured, never
 estimated.
 
-![Kanso Disk Space: the Usage tab](preview.png)
+<img src="preview.png" width="439" alt="Kanso Disk Space: the Usage tab">
 
 ## What it shows
 
@@ -15,6 +15,9 @@ estimated.
 - **Hover**: free space, the whole disk as one bar, any warning, the trend,
   the three biggest uses and what you could reclaim. When used space moved by
   1 GiB or more since you last looked, a line says what changed.
+
+  <img src="screenshots/glance.png" width="440" alt="The hover card: free space, the disk bar, the trend, the three biggest uses and what is reclaimable">
+
 - **Click**: the full view, **Usage · Cleanup · Trend**. From Low it opens on
   Cleanup.
   - **Usage**: where every byte is, one decimal everywhere, and the rows add up
@@ -30,6 +33,9 @@ estimated.
     caches in `~/.config`. An open app's caches are measured and counted, and
     the row says "close Claude first": they are cleaned only once the app is
     closed.
+
+    <img src="screenshots/cleanup.png" width="440" alt="The Cleanup tab: each cache with its size, largest first, and the snapshots kept for rollback">
+
   - **Trend**: free space over 90 days and a forecast written as a range
     ("Critical in 9–14 days"). For its first days it says when it will be
     ready ("ready in 4 days").
@@ -37,6 +43,9 @@ estimated.
   ›* opens a short panel of steps (with Copy beside each command), *Ask agent
   ›* hands the job to your coding agent, *Rescan ›* measures again, *Why ›*
   and *How to fix ›* open this file at the section that explains.
+
+  <img src="screenshots/what-now.png" width="896" alt="The Low warning on the Cleanup tab, and its What now panel with three steps">
+
 - **After a cleanup**, Cleanup's footer is a receipt: "Last cleanup today · 9.8
   of 12.4 GiB freed", and, when it freed less than expected, why (held by
   rollback points, waiting in the Trash).
