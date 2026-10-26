@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.1
+
+- After the laptop wakes from sleep the bar updates within 30 seconds, and
+  at once if you open the card. Before, it waited out the rest of its
+  15-minute timer, and a wake from sleep could show "not updated since…"
+  in red.
+- "Not updated since…" now means the plugin itself is stuck: a check
+  overdue while the machine was awake. Time asleep never counts.
+
 ## 1.0.0
 
 First release.

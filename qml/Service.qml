@@ -2,9 +2,11 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import "../js/Model.js" as Model
 
 // Side effects only (§5): the tick, the scan, setup, notifications and the last good
-// card. Every number and string comes from the engine; a hover never starts a process.
+// card. Every number and string comes from the engine; a hover starts a process only
+// for a tick that is due (D150).
 Item {
     id: root
 
@@ -12,7 +14,7 @@ Item {
     property var shell: null
     // The code version the widget expects (BarWidget.qml expectedServiceVersion);
     // keepLoaded keeps an old Service running across an update until restart.
-    readonly property int serviceVersion: 1
+    readonly property int serviceVersion: 2
 
     // The system Python: a mise/pyenv shim on PATH may be older than 3.11.
     readonly property string python: "/usr/bin/python3"
@@ -77,14 +79,13 @@ Item {
         return ["--watch", String(s.watch), "--low", String(s.low), "--critical", String(s.critical), "--horizon", String(s.horizon), "--notifications", s.notifications ? "1" : "0", "--number-on-bar", s.numberOnBar ? "1" : "0", "--totals-only", s.totalsOnly ? "1" : "0"];
     }
 
-    // The tick, every 15 minutes: the first waits for the widget's settings, so a
-    // start ticks once with the right lines (with no widget, after 10 s).
+    // The tick, every 15 minutes by the wall clock (D150): the first waits for the
+    // widget's settings, so a start ticks once with the right lines (with no
+    // widget, after 10 s).
     function start() {
         firstTickFallback.stop();
-        if (tickTimer.running)
-            root.tick();
-        else
-            tickTimer.start();
+        clockTimer.start();
+        root.tick();
     }
 
     Timer {
@@ -94,12 +95,37 @@ Item {
         onTriggered: root.start()
     }
 
+    // A Timer counts awake time only, so a 15-minute one would fire as late after
+    // a resume as the sleep was long: every 30 s of awake time the wall clock
+    // says whether a tick is due, so one runs within 30 s of a resume.
+    readonly property int tickEvery: 15 * 60
+    property real lastTickAt: 0
     Timer {
-        id: tickTimer
-        interval: 15 * 60 * 1000
+        id: clockTimer
+        interval: 30 * 1000
         repeat: true
-        triggeredOnStart: true
-        onTriggered: root.tick()
+        onTriggered: {
+            root.countAwake(clockTimer.interval / 1000);
+            root.catchUp();
+        }
+    }
+
+    // A tick when one is due: from the clock, and when a card opens (D150).
+    function catchUp() {
+        if (clockTimer.running && Model.tickDue(root.lastTickAt, Date.now() / 1000, root.tickEvery))
+            root.tick();
+    }
+
+    // Stalled (D67, D150): the engine's deadline counted in awake time, so a
+    // wake from sleep is not a stall; a tick overdue while awake is.
+    property real awakeLeft: 0
+    property real seenStaleAfter: 0
+    readonly property real staleAfter: root.card && root.card.glance ? root.card.glance.stale_after : 0
+    readonly property bool stalled: Model.stalled(root.staleAfter, root.awakeLeft)
+    onStaleAfterChanged: root.countAwake(0)
+    function countAwake(seconds) {
+        root.awakeLeft = Model.awakeLeft(root.awakeLeft, root.staleAfter, root.seenStaleAfter, Date.now() / 1000, seconds);
+        root.seenStaleAfter = root.staleAfter;
     }
 
     function tick() {
@@ -107,6 +133,7 @@ Item {
             root.tickQueued = true;
             return;
         }
+        root.lastTickAt = Date.now() / 1000;
         tickProc.command = root.engineCmd("tick");
         tickProc.running = true;
     }
@@ -316,6 +343,9 @@ Item {
             "card_as_of": root.card ? root.card.as_of : 0,
             "settings": root.settings,
             "tick_running": tickProc.running,
+            "last_tick_at": root.lastTickAt,
+            "awake_left": root.awakeLeft,
+            "stalled": root.stalled,
             "scanning": scanProc.running,
             "setup_state": root.setupState,
             "scan_at": root.card ? root.card.scan_at : 0,

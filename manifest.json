@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.nathankramm.kanso-disk-space",
   "name": "Kanso Disk Space",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "nathankramm",
   "license": "MIT",
   "description": "Exact disk space for the bar: where every byte went, what's safe to clean, and when you'll run low. Quiet until it matters.",

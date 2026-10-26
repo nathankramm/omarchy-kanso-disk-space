@@ -52,6 +52,35 @@ function notePlace(points, noteW, noteH, width, plotH, pad) {
   return { x: 0, y: 0 }
 }
 
+// The Service's clock (D150). Qt's Timer counts awake time only: it stops in
+// suspend, so a 15-minute Timer fires as late after a resume as the machine
+// slept. The card's times are wall-clock epochs. So the tick is due by the
+// wall clock (a whole interval since the last one started, or the clock went
+// back past it), checked every 30 s and when a card opens.
+function tickDue(lastTick, now, interval) {
+  return now < lastTick || now - lastTick >= interval
+}
+
+// Awake seconds left before the card counts as stalled: a newer sample
+// (another stale_after) starts the count again from the engine's deadline;
+// else `awake` seconds of awake time went by. A sleep spends none of it.
+function awakeLeft(left, staleAfter, seenStaleAfter, now, awake) {
+  if (staleAfter !== seenStaleAfter) return staleAfter - now
+  return left - awake
+}
+
+// Stalled (D67): the plugin itself is stuck, a tick overdue while the
+// machine was awake; never because it slept. No deadline (0) never stalls.
+function stalled(staleAfter, left) {
+  return staleAfter > 0 && left <= 0
+}
+
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { colourOf: colourOf, notePlace: notePlace }
+  module.exports = {
+    colourOf: colourOf,
+    notePlace: notePlace,
+    tickDue: tickDue,
+    awakeLeft: awakeLeft,
+    stalled: stalled,
+  }
 }

@@ -12,17 +12,18 @@ BarWidget {
     moduleName: "io.github.nathankramm.kanso-disk-space"
 
     readonly property var service: bar && bar.shell ? bar.shell.serviceFor("io.github.nathankramm.kanso-disk-space") : null
-    readonly property int expectedServiceVersion: 1
+    readonly property int expectedServiceVersion: 2
     readonly property var card: service ? service.card : null
     readonly property var face: card ? card.bar : null
     readonly property string glyph: face ? face.glyph : "\uf0a0"
     // A vertical bar shows the glyph only; the number lives in the card.
     readonly property string number: face && !root.vertical ? face.text : ""
     // Once the Service has stalled the glyph dims, Omarchy's "inactive" (D67),
-    // and the cards say since when: the engine names the colour; this compares
-    // its epoch with the one clock, refreshed every 30 s and when a card opens.
+    // and the cards say since when: the engine names the colour and the words'
+    // times; the Service says whether it stalled, by awake time (D150). The one
+    // clock is refreshed every 30 s and when a card opens.
     property real nowSec: Date.now() / 1000
-    readonly property bool stalled: card !== null && card.glance && card.glance.stale_after > 0 && nowSec > card.glance.stale_after
+    readonly property bool stalled: card !== null && service !== null && service.stalled === true
     readonly property color tint: Model.colourOf(face ? (stalled ? face.stale_colour : face.colour) : "muted", Color, card ? card.palette : null)
     // Before the exact measure is set up only the setup panel (D80); where
     // nothing more is exact, only Trend (D77)
@@ -48,8 +49,12 @@ BarWidget {
         contentWidth: popup.fittedContentWidth(hcard.implicitWidth + popup.padding * 2 + Border.left(popup.borderSpec) + Border.right(popup.borderSpec))
         contentHeight: popup.fittedContentHeight(hcard.implicitHeight)
         onOpenChanged: {
-            if (popup.open)
+            if (popup.open) {
                 root.nowSec = Date.now() / 1000;
+                // data older than a tick, before the 30-s check: tick now (D150)
+                if (root.service && root.service.serviceVersion >= 2)
+                    root.service.catchUp();
+            }
         }
 
         HoverCard {
