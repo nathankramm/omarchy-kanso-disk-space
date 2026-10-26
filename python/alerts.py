@@ -76,8 +76,21 @@ def level_kind(prev, new, sent, now):
     return new
 
 
-# One verb on every toast that opens the agent (D66).
+# One verb on every toast that opens Cleanup (D66, D146).
 CLEAN_UP = "Click to clean up."
+# A toast's click opens the card, never the agent (D145): bin's `open`, the
+# bar widget's IPC. Cleanup, as the bar's click at Low and worse (D117), or a
+# warning's What now panel, as the bar's click opens it (D131).
+CLICK_CLEANUP = ["open", "reclaim"]
+
+
+def click_panel(panel_id):
+    return ["open", "panel", panel_id]
+
+
+# The app name Do Not Disturb lets through at critical urgency (D9, D148;
+# Delivery.js bypassesQuiet): fast-fill and read-only only.
+BREAKS_QUIET = "notify-send"
 
 
 # (urgency, title, body) per note; "metadata" is Critical lifted by btrfs
@@ -90,8 +103,7 @@ NOTES = {
     "critical": ("normal", "Disk space critical · {free} free",
                  f"Updates need 10 GiB free. {CLEAN_UP}"),
     "blocked": ("critical", "Updates blocked · {free} free",
-                ("Updates need 10 GiB free. System files free up only as old "
-                 "snapshots are removed.")),
+                f"Updates need 10 GiB free. {CLEAN_UP}"),
 }  # fmt: skip
 
 
@@ -110,14 +122,16 @@ def level_note(kind, avail, cause, forecast_text=""):
         "app": APP_NAME,
         "title": title.format(free=units.free_gib(avail)),
         "body": body.format(lead=lead),
+        # metadata's "Click to check." opens its What now panel, as the bar does
+        "click": click_panel("metadata") if key == "metadata" else CLICK_CLEANUP,
     }
 
 
 def argv(note, plugin_bin):
     """The exact omarchy-notification-send command. --app-name and -u are
     always given: the script's default app name, omarchy-action, would break
-    through Do Not Disturb (D9). --exec must come last; with no plugin_bin
-    the toast has no click (read-only, D102)."""
+    through Do Not Disturb (D9). --exec must come last: the note's click, bin's
+    `open` (D145); a note without one, or no plugin_bin, has no click."""
     cmd = [
         "omarchy-notification-send",
         "--app-name",
@@ -129,4 +143,5 @@ def argv(note, plugin_bin):
         note["title"],
         note["body"],
     ]
-    return cmd + ["--exec", plugin_bin, "ask"] if plugin_bin else cmd
+    click = note.get("click")
+    return cmd + ["--exec", plugin_bin, *click] if plugin_bin and click else cmd

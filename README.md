@@ -42,7 +42,9 @@ estimated.
   rollback points, waiting in the Trash).
 - **Notifications**: when the level gets worse (Low, Critical, updates
   blocked), when the forecast reaches Critical within your horizon, when the
-  disk fills fast, and when the disk turns read-only.
+  disk fills fast, and when the disk turns read-only. Clicking one opens the
+  card on Cleanup (read-only: its What now panel). Fast filling and read-only
+  show through Do Not Disturb.
 - **Right-click**: Ask agent · Copy report · Save report (to `~/Documents`),
   and Remove exact sizes while the helper is installed.
 

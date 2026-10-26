@@ -753,8 +753,11 @@ def readonly_tick(now, settings, settings_notice, table, readonly):
     known = {"table": table, "readonly": readonly}
     card = build_card(samples, doc, ok, settings, settings_notice, now, known)
     if health.first_notice(readonly):
-        note = {**health.note(readonly), "app": alerts.APP_NAME}
-        card["notify"] = [{"argv": alerts.argv(note, None)}]
+        # through Do Not Disturb as fast-fill (D148); the panel, never the
+        # agent, which could not write its report
+        note = {**health.note(readonly), "app": alerts.BREAKS_QUIET,
+                "click": alerts.click_panel("readonly")}  # fmt: skip
+        card["notify"] = [{"argv": alerts.argv(note, plugin_bin())}]
     return card
 
 

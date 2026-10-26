@@ -46,6 +46,12 @@ def where(paths):
     return " and ".join(paths)
 
 
+def is_are(paths):
+    """The warning's fact and the toast's title (D146): "/ is read-only",
+    "/ and /home are read-only"."""
+    return f"{where(paths)} {'are' if len(paths) > 1 else 'is'} read-only"
+
+
 def boot_percent(table):
     """How full /boot is, in whole percent rounded down, when it is a mount
     of its own (the ESP); None otherwise or unreadable."""
@@ -69,13 +75,14 @@ def boot_percent(table):
 
 
 def note(paths):
-    """The read-only notification: critical, no click (the agent could not
-    write its report). No path from the home folder (§8.6)."""
+    """The read-only notification: critical; its click opens the What now
+    panel (D145, D146), which says what to do. No path from the home folder
+    (§8.6)."""
     return {
         "kind": "readonly",
         "urgency": "critical",
-        "title": f"Read-only: {where(paths)}",
-        "body": "Saving files fails until a restart. If it comes back, check the disk.",
+        "title": is_are(paths),
+        "body": "Saving fails until a restart. Click for what to do.",
     }
 
 

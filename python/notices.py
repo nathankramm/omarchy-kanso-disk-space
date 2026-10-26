@@ -21,6 +21,7 @@ A link is {text, verb, argv, panel}: verb panel (opens `panel`), rescan (a
 scan), run (closes the card and runs argv) or copy (runs argv, stays open).
 """
 
+import health
 import units
 
 # characters of the caption and body fonts across the card (408 units at
@@ -89,17 +90,12 @@ def what_now(panel):
     return link(WHAT_NOW, "panel", panel=panel)
 
 
-def is_are(paths):
-    where = " and ".join(paths)
-    return f"{where} {'are' if len(paths) > 1 else 'is'} read-only"
-
-
 def readonly_warning(paths, bin_path):
     """D124: the report needs a writable /home, so Ask agent only then."""
     links = [what_now("readonly")]
     if "/home" not in paths:
         links.append(ask(bin_path, "readonly"))
-    return warning("readonly", f"{is_are(paths)[0].upper()}{is_are(paths)[1:]}",
+    return warning("readonly", f"{health.is_are(paths)[0].upper()}{health.is_are(paths)[1:]}",
                    "Your files are safe to read; saving fails until a restart.",
                    "Saving fails until a restart.", links, urgent=True)  # fmt: skip
 
@@ -236,7 +232,7 @@ def all_panels(facts, bin_path):
     free = units.free_gib(facts.get("free") or 0)
     meta = facts.get("metadata")
     lines = facts.get("lines") or {}
-    ro = is_are(facts.get("readonly") or ["/"])
+    ro = health.is_are(facts.get("readonly") or ["/"])
     clear = facts.get("low", 30) + 5
     agent = footer(ASK, [bin_path, "ask"])
     return {

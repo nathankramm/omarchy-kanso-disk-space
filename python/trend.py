@@ -1,6 +1,8 @@
 """The forecast's words: the Glance trend line, the Trend view's rows, and the
 slow- and fast-lane notifications (§8.5, §8.6)."""
 
+import math
+
 import alerts
 import changes
 import forecast
@@ -101,7 +103,8 @@ def last_hour_value(rate):
     if rate["state"] != "ok":
         return DASH, ""
     note = "fast" if forecast.fast_hit(rate) else ""
-    return units.signed_gib(round(rate["hour_delta"])), note
+    # free space, said so: Big changes below it counts used space (D144)
+    return f"{units.signed_gib(round(rate['hour_delta']))} free", note
 
 
 JUMP_DAYS = 90  # the chart's span: Big changes looks this far back
@@ -169,19 +172,23 @@ def slow_note(lane):
         "app": alerts.APP_NAME,
         "title": f"Critical {days_phrase(lane)}",
         "body": f"Free space is falling {rate_text(lane)}. {alerts.CLEAN_UP}",
+        "click": alerts.CLICK_CLEANUP,
     }
 
 
 def fast_note(rate):
-    """The one notification that breaks through Do Not Disturb: critical, as
-    notify-send (§6 "Fast lane"; Delivery.js bypassesQuiet)."""
-    hours = int(forecast.gate_in(rate) // forecast.HOUR)
-    when = "within the hour" if hours < 1 else f"in about {hours} h"
+    """Breaks through Do Not Disturb, with read-only: critical, as
+    notify-send (§6 "Fast lane"; Delivery.js bypassesQuiet). The fast lane
+    has one rate, the hour's two ends, and no spread to make a range from,
+    so the body gives a bound: the gate's hours rounded up (D147)."""
+    hours = math.ceil(forecast.gate_in(rate) / forecast.HOUR)
+    when = "within the hour" if hours <= 1 else f"within {hours} h"
     return {
         "kind": "fast",
         "urgency": "critical",
-        "app": "notify-send",
+        "app": alerts.BREAKS_QUIET,
         # one toast line (tests/test_alerts.py TITLE_BUDGET, D66)
         "title": f"Disk filling fast · {units.signed_gib(round(rate['hour_delta']))} in 1 h",
-        "body": f"Updates will be blocked {when} at this rate.",
+        "body": f"Updates will be blocked {when} at this rate. {alerts.CLEAN_UP}",
+        "click": alerts.CLICK_CLEANUP,
     }

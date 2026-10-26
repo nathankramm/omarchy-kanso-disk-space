@@ -7,6 +7,10 @@
 #                           Claude starts in plan mode (D33). A topic is a
 #                           warning's Ask agent: /boot nearly full (D123), a
 #                           read-only disk (D124)
+#   kanso-disk-space open reclaim | open panel <id>
+#                           a toast's click (D145): the full view on Cleanup, or
+#                           a warning's What now panel, through the bar widget's
+#                           IPC (BarWidget.qml full · panel); never the agent
 #   kanso-disk-space details  the kernel's log lines about the disk to the
 #                           clipboard: the read-only panel's Copy details (D124)
 #   kanso-disk-space readme <section>  the README at a section, in a terminal:
@@ -161,6 +165,20 @@ details() {
 
 # The README the plugin ships, at one section, in Omarchy's floating terminal
 # (D122): less opens on the section's heading.
+# The bar widget's IPC target: BarWidget.qml's IpcHandler.
+ipc_target=io.github.nathankramm.kanso-disk-space
+open_card() {
+  case "${1:-}" in
+    reclaim) exec omarchy-shell "$ipc_target" full reclaim ;;
+    panel)
+      # a panel id, never a path or an option
+      [[ ${2:-} =~ ^[a-z]+$ ]] || exit 2
+      exec omarchy-shell "$ipc_target" panel "$2"
+      ;;
+    *) exit 2 ;;
+  esac
+}
+
 readme() {
   local heading
   case "${1:-}" in
@@ -420,6 +438,7 @@ case "${1:-menu}" in
     esac
     ;;
   ask) ask "${2:-}" ;;
+  open) open_card "${2:-}" "${3:-}" ;;
   details) details ;;
   readme) readme "${2:-}" ;;
   copy) copy_report ;;
@@ -431,7 +450,7 @@ case "${1:-menu}" in
   remove) remove_exact ;;
   remove-root) remove_root ;;
   *)
-    echo "usage: kanso-disk-space ask [boot|readonly]|details|readme <section>|copy|save|menu|measure-install|measure-uninstall|setup|remove" >&2
+    echo "usage: kanso-disk-space ask [boot|readonly]|open reclaim|open panel <id>|details|readme <section>|copy|save|menu|measure-install|measure-uninstall|setup|remove" >&2
     exit 2
     ;;
 esac

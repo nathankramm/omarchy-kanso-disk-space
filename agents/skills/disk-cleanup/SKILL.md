@@ -2,8 +2,8 @@
 name: disk-cleanup
 description: >
   Free disk space safely on an Omarchy machine from a Kanso Disk Space report.
-  Use when a "Disk space low / critical" or "omarchy update is blocked"
-  notification is clicked, when asked to clean up the disk or make room for an
+  Use when Ask agent is chosen in the Kanso Disk Space card or menu after a
+  "Disk space low / critical" or "Updates blocked" warning, when asked to clean up the disk or make room for an
   update, or when given a report written by Kanso Disk Space. Covers btrfs
   snapshots holding freed space, the 10 GiB update gate, and per-category tools.
   Triggers: disk full, low disk space, free up space, omarchy update blocked,
