@@ -13,7 +13,8 @@ First release.
 - Warnings with What now panels, notifications when things get worse, and a
   line for what changed since you last looked.
 - Exact sizes on btrfs through an optional read-only helper (one click to set
-  up, update or remove), and on ext4 without one.
+  up, update or remove), and on ext4 without one. The card says when a
+  measurement is running, the first one after setup included.
 - Ask agent: an exact report and a cleanup skill for your coding agent, with
   a receipt of what it freed. Totals only for cloud agents.
 - Developer caches outside `~/.cache`, and Electron apps' caches in

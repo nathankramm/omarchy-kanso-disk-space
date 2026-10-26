@@ -9,7 +9,8 @@ all three under each page's hero. The Glance, passive, shows the fact and
 a click on the bar icon does for it (D131): Cleanup for Low, Critical and
 Blocked; the warning's What now panel for a read-only disk, /boot, metadata
 and the level settings (`click_panel`); the Update flow for the helper; the
-full view showing the warning for the rest. "What now" opens a panel inside
+full view showing the warning for the rest; none for a measurement going
+on, quiet with no link (D149). "What now" opens a panel inside
 the card: the state as its hero, "what now", at most three short steps (the
 first with the figure), a command beside a step with Copy, and "‹ Back".
 
@@ -39,9 +40,11 @@ COPY = "Copy"
 COPIED = "Copied"
 COPY_DETAILS = "Copy details ›"
 CAPTION = "what now"
+MEASURING = "Usually 1–2 minutes. Free space and warnings are exact now."
 # the order warnings are shown in: the gravest first
 ORDER = ("readonly", "metadata", "blocked", "critical", "boot", "low", "slow",
-         "failed", "link", "shared", "refused", "update", "settings")  # fmt: skip
+         "failed", "measuring", "link", "shared", "refused", "update",
+         "settings")  # fmt: skip
 # what a click on the bar icon does for the first warning (D131)
 CLEAN_UP = "Click to clean up."
 WHAT_TO_DO = "Click for what to do."
@@ -49,7 +52,7 @@ TO_UPDATE = "Click to update it."
 DETAILS = "Click for details."
 HINTS = {"low": CLEAN_UP, "critical": CLEAN_UP, "blocked": CLEAN_UP,
          "readonly": WHAT_TO_DO, "boot": WHAT_TO_DO, "metadata": WHAT_TO_DO,
-         "settings": WHAT_TO_DO, "update": TO_UPDATE}  # fmt: skip
+         "settings": WHAT_TO_DO, "update": TO_UPDATE, "measuring": ""}  # fmt: skip
 # the warnings whose click opens their What now panel
 CLICK_PANELS = ("readonly", "boot", "metadata", "settings")
 LEVEL_WORDS = {
@@ -124,6 +127,10 @@ def sizes_from(measured_at):
 def exactness_warning(ex, measured_at, bin_path):
     """The exactness issue as a warning (D119), or None."""
     issue, text = ex.get("issue"), ex.get("text") or ""
+    if issue == "measuring":
+        # quiet, in the text colour: a run going on, nothing to do; the
+        # Glance says the same two lines, with no click hint (D149)
+        return warning("measuring", text, MEASURING, MEASURING)
     if issue in ("slow", "failed"):
         meaning, glance = sizes_from(measured_at)
         return warning(issue, text, meaning, glance, [link(RESCAN, "rescan")])
@@ -179,8 +186,9 @@ def build(level, metadata, readonly, boot, boot_limit, ex, measured_at, settings
                            "Using the defaults until fixed.",
                            [what_now("settings"), readme(bin_path, "settings", HOW)]))  # fmt: skip
     out.sort(key=lambda w: ORDER.index(w["id"]))
-    if out:
-        out[0]["glance"] += " " + HINTS.get(out[0]["id"], DETAILS)
+    hint = HINTS.get(out[0]["id"], DETAILS) if out else ""
+    if hint:
+        out[0]["glance"] += " " + hint
     return out
 
 

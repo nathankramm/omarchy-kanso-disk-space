@@ -162,17 +162,48 @@ Item {
     function scan() {
         if (scanProc.running)
             return;
+        scanProc.cards = 0;
         scanProc.command = root.engineCmd("scan");
         scanProc.running = true;
     }
 
-    EngineProc {
+    // A scan that runs the helper prints the card as it starts (measuring, D149),
+    // then the final card: each line is accepted as it comes.
+    Process {
         id: scanProc
-        onAccepted: {
+        property int cards: 0
+        stdout: SplitParser {
+            onRead: line => {
+                scanProc.cards += 1;
+                root.accept(line, "", false, false);
+            }
+        }
+        stderr: StdioCollector {
+            id: scanErr
+        }
+        onExited: code => {
+            if (scanProc.cards === 0)
+                root.accept("", scanErr.text, false, false);
+            // a scan that died mid-run leaves its card measuring: the engine
+            // says what is true now (D149)
+            if (code !== 0)
+                root.refresh();
             // the first measured scan after setup has landed (D80)
             if (root.setupState === "running")
                 root.setupState = "idle";
         }
+    }
+
+    // The card from the state as it is, no new sample.
+    function refresh() {
+        if (cardProc.running)
+            return;
+        cardProc.command = root.engineCmd("card");
+        cardProc.running = true;
+    }
+
+    EngineProc {
+        id: cardProc
     }
 
     // Setup (D80) through bin's setup (the polkit dialog), then a scan.

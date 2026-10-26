@@ -20,6 +20,11 @@ snapshots, root_bytes, all_bytes, only_bytes, and the exact block
 {now_bytes, after_bytes}}} (D99), or for a kept row {state, size_bytes}
 (D104)}.
 
+Before it runs the helper, the scan writes RUN_NAME: when it started, and
+its own pid with that process's start time, so a card made meanwhile can
+say the run is going on, and only while it is alive and within
+run_limit() (D149).
+
 The paths come from a request the engine writes as the user just before it
 runs the helper (request_doc, REQUEST_NAME); a response is applied only when
 it names that request's sha256.
@@ -49,6 +54,10 @@ TIMEOUT = 660
 OUT_OF_DATE = "measure helper out of date: run kanso-disk-space measure-install"
 FIELDS = ("snapshots", "root_bytes", "all_bytes", "only_bytes")
 REQUEST_NAME = "measure-request.json"
+# the run going on (D149): a run is shown as measuring only while its scan is
+# alive and within the whole run's timeout plus this margin
+RUN_NAME = "measure-run.json"
+RUN_MARGIN = 60
 ROWS = ("home", "system", "var", "swap", "snapshots")
 CHILDREN_PER_ROW = 3
 SUDO = ("sudo", "-n")
@@ -194,6 +203,47 @@ def each_of(each):
     }
 
 
+def timeout():
+    return int(hook("TIMEOUT") or TIMEOUT)
+
+
+def run_limit():
+    """How long a run may be shown as going on (D149)."""
+    return timeout() + RUN_MARGIN
+
+
+def start_ticks(pid):
+    """The process's start time in clock ticks since boot (/proc/<pid>/stat
+    field 22), or None: with the pid, it names one process, never a later
+    one given the same pid."""
+    try:
+        with open(f"/proc/{pid}/stat", encoding="ascii", errors="replace") as f:
+            fields = f.read().rpartition(")")[2].split()
+        return int(fields[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def run_doc(now):
+    """measure-run.json for the scan about to run the helper (D149)."""
+    pid = os.getpid()
+    return {"schema": 1, "started_at": now, "pid": pid, "start": start_ticks(pid)}
+
+
+def valid_run(doc):
+    """measure-run.json as written by run_doc, else None."""
+    if not isinstance(doc, dict) or not units.whole(doc.get("started_at"), 0):
+        return None
+    if not units.whole(doc.get("pid"), 1) or not units.whole(doc.get("start"), 0):
+        return None
+    return doc
+
+
+def alive(doc):
+    """Whether the run's scan is still the process that wrote it."""
+    return start_ticks(doc["pid"]) == doc["start"]
+
+
 def request_doc(cats, ledger_doc, now, essentials=False):
     """What the helper is asked to measure: each measured category's paths
     and frees, and each folder row's named folders (D72). `essentials` (the
@@ -254,13 +304,12 @@ def run(request_sha="", known=None):
         return {"state": "out-of-date", "message": OUT_OF_DATE}
     argv_hook = hook("ARGV")
     argv = json.loads(argv_hook) if argv_hook else [*SUDO, installed_path()]
-    timeout = int(hook("TIMEOUT") or TIMEOUT)
     try:
         p = subprocess.run(
             argv,
             capture_output=True,
             text=True,
-            timeout=timeout,
+            timeout=timeout(),
             check=False,
             stdin=subprocess.DEVNULL,
         )

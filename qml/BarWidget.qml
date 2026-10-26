@@ -209,11 +209,17 @@ BarWidget {
         return page || "used";
     }
 
-    // The first measured scan after setup lands: the panel gives way to Usage
-    // with its exact numbers.
+    // The first measured scan after setup lands: the panel, or Trend alone while
+    // it measured (D149), gives way to Usage with its exact numbers.
+    property bool wasTrendOnly: false
     onExactnessChanged: {
-        if (fullPopup.open && fullPopup.card.page === "setup" && !(root.exactness && root.exactness.panel))
+        const page = fullPopup.card.page;
+        const full = root.exactness !== null && root.exactness.full === true;
+        if (fullPopup.open && page === "setup" && !(root.exactness && root.exactness.panel))
             fullPopup.card.page = root.entryPage("used");
+        else if (fullPopup.open && page === "trend" && full && root.wasTrendOnly)
+            fullPopup.card.page = root.entryPage("used");
+        root.wasTrendOnly = root.exactness !== null && root.exactness.trend_only === true;
     }
 
     // The engine's page for a click: Cleanup at Low and worse (D117), or the

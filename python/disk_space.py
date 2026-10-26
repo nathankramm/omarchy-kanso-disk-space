@@ -5,7 +5,9 @@
     disk_space.py card     the card from the current state, no new sample
     disk_space.py scan     measures the categories and the ledger (scan.json,
                            ledger.json; nice 19, idle I/O, 5-minute limit), then
-                           prints the card. Service runs it daily
+                           prints the card. Service runs it daily. A scan that
+                           runs the helper first prints the card as it starts,
+                           one line, then the final card (D149)
     disk_space.py viewed   records a visit to the full view (views.json), the
                            change line's "since you last looked" (D115), then
                            prints the card. Service runs it on each full view
@@ -15,7 +17,7 @@
     disk_space.py preview DIR
                            the card for a saved fixture state (DIR holds the
                            state files and preview.json: now, settings,
-                           readonly, boot, fstype, status, dua, tz), never
+                           readonly, boot, fstype, status, run, dua, tz), never
                            writing anything: the preview mode (D130)
     disk_space.py report --md|--json|--goal [--out PATH]
                            the cleanup report (report.py), printed or written
@@ -591,9 +593,21 @@ def load_state(path):
     return doc if isinstance(doc, dict) and doc.get("schema") == 1 else None
 
 
-def exactness_now(scan, last_run, known=None):
+def run_now(last_run, now, known=None):
+    """The helper's run going on (exactness.run_state, D149) from
+    measure-run.json; a preview gives it in preview.json."""
+    known = known or {}
+    if "run" in known:
+        return known["run"]
+    marker = measure.valid_run(load_state(state_file(measure.RUN_NAME)))
+    alive = bool(marker) and measure.alive(marker)
+    return exactness.run_state(marker, last_run, now, alive, measure.run_limit())
+
+
+def exactness_now(scan, last_run, known=None, now=None):
     """exactness.block for this machine now: the root filesystem, the
-    helper's state and its last run, measure.json (D76, D77, D79)."""
+    helper's state, its last run, measure.json (D76, D77, D79), and the run
+    going on (D149)."""
     known = known or {}
     if "root" in known:
         root = known["root"]
@@ -605,21 +619,29 @@ def exactness_now(scan, last_run, known=None):
     else:
         status = measure.status() if fstype == "btrfs" else "absent"
     measured_at = scan["measured_at"] if scan and scan.get("measured") else 0
-    return exactness.block(fstype, status, last_run, measured_at)
+    run = run_now(last_run, int(time.time()) if now is None else now, known)
+    return exactness.block(fstype, status, last_run, measured_at, run)
 
 
-def scan_due(scan_at, last_run, mode, cleanup, now):
+def scan_due(scan_at, last_run, ex, cleanup, now, started=0):
     """Service scans when this is true (§5, D94): more than a day after the
     last run (before the first, scan_at is 0), at once for a current helper
-    that has not measured (D77), at once after one timeout, for the
-    essentials-only retry (D121), and after a cleanup newer than the last run
-    (D95). A run is the last scan, or the helper's last run, which a failed
-    one does not replace (D79): a run that did not finish is not due again
-    for a day (D101), and a cleanup is never due twice. One dated over an
-    hour ahead of the clock waits (a wrong clock must not rescan every
+    that has not measured (D77; also when the last scan ran before setup or
+    the Update, D149), at once after one timeout, for the essentials-only
+    retry (D121), and after a cleanup newer than the last run (D95); never
+    while a run is going on (D149). A run is the last scan, or the helper's
+    last run, which a failed one does not replace (D79), or the start of one
+    that never finished (`started`): a run that did not finish is not due
+    again for a day (D101), and a cleanup is never due twice. One dated over
+    an hour ahead of the clock waits (a wrong clock must not rescan every
     tick)."""
-    ran = max(scan_at, (last_run or {}).get("measured_at") or 0)
-    if now - ran > SCAN_EVERY or mode == "pending" or exactness.retrying(last_run):
+    if ex["issue"] == "measuring":
+        return False
+    ran = max(scan_at, (last_run or {}).get("measured_at") or 0, started)
+    unrun = ex["mode"] == "exact" and exactness.unrun(last_run)
+    if now - ran > SCAN_EVERY or ex["mode"] == "pending" or unrun:
+        return True
+    if exactness.retrying(last_run):
         return True
     if cleanup is None or cleanup["t"] > now + units.FUTURE_SLACK:
         return False
@@ -634,7 +656,7 @@ def scan_fields(card, colour, size, settings_notice, now, known=None):
     doc = load_state(state_file("ledger.json"))
     last_run = load_state(state_file("measure.json"))
     cleanup = read_last_cleanup()
-    ex = exactness_now(scan, last_run, known)
+    ex = exactness_now(scan, last_run, known, now)
     # when it last scanned, shown or not: Service's daily cadence (§5)
     card["scan_at"] = scan["measured_at"] if scan else 0
     card["exactness"] = {k: ex[k] for k in ("full", "trend_only", "line", "panel")}
@@ -649,9 +671,15 @@ def scan_fields(card, colour, size, settings_notice, now, known=None):
     card["panels"] = notices.panels(facts, plugin_bin(), card["warnings"])
     card["bar"]["click_panel"] = notices.click_panel(card["warnings"])
     # a read-only disk could not keep a scan (D102)
+    marker = measure.valid_run(load_state(state_file(measure.RUN_NAME)))
+    # a run that never finished counts from its start (D149)
+    started = marker["started_at"] if marker else 0
     card["exactness"]["scan_due"] = not (known or {}).get("readonly") and scan_due(
-        card["scan_at"], last_run, ex["mode"], cleanup, now
+        card["scan_at"], last_run, ex, cleanup, now, started
     )
+    if ex["issue"] == "measuring":
+        # the block says it; never "Measuring…" under it as well (D149)
+        card["glance"]["running_text"] = ""
     if not ex["full"]:
         # only what is exact: free, the bar, the levels and the trend (D76)
         scan = doc = None
@@ -805,7 +833,14 @@ def cmd_scan(now, settings, settings_notice, loaded=None):
     status = measure.status() if btrfs else "absent"
     # after one timeout, the essentials only: no folder figures (D121)
     essentials = exactness.retrying(load_state(state_file("measure.json")))
-    measured = (run_helper(cats, doc, now, status, essentials) if btrfs
+
+    def started():
+        # the card as the helper starts: measuring, at once (D149)
+        print(json.dumps(cmd_card(now, settings, settings_notice, loaded,
+                                  {"table": table, "root": ctx.root_mount, "status": status}),
+                         ensure_ascii=False), flush=True)  # fmt: skip
+
+    measured = (run_helper(cats, doc, now, status, essentials, started) if btrfs
                 else {"state": "absent"})  # fmt: skip
     if measured.get("state") == "ok":
         # D54: the snapshots row from the helper's figure
@@ -900,16 +935,20 @@ def last_run(measured, now, before=None):
             "timeouts": timeouts}  # fmt: skip
 
 
-def run_helper(cats, doc, now, status, essentials=False):
+def run_helper(cats, doc, now, status, essentials=False, started=None):
     """The optional root helper (D53, D69–D73): only a current copy, only
     here, daily. Its request, the paths the scan found, is written first; an
     answer is applied only to that request (its sha256). `essentials` asks
-    for no folder figures (D121)."""
+    for no folder figures (D121). measure-run.json says a run is going on,
+    and `started` is called once it is written (D149)."""
     if status != "current":
         return measure.run(known=status)
     data = measure.request_bytes(measure.request_doc(cats, doc, now, essentials))
     with state_lock():
         atomic_write(state_file(measure.REQUEST_NAME), data.decode())
+        write_json(state_file(measure.RUN_NAME), measure.run_doc(now))
+    if started:
+        started()
     return measure.run(hashlib.sha256(data).hexdigest(), known=status)
 
 
@@ -996,8 +1035,9 @@ def main(argv=None):
 
 
 def preview_known(spec):
-    """`known` for a fixture: the root filesystem, the helper's status, what
-    statvfs says of / and /home and /boot, and whether dua is there."""
+    """`known` for a fixture: the root filesystem, the helper's status and
+    its run going on, what statvfs says of / and /home and /boot, and
+    whether dua is there."""
     fstype = spec.get("fstype", "btrfs")
     root = {
         "mount_point": "/",
@@ -1005,7 +1045,9 @@ def preview_known(spec):
         "source": "/dev/preview",
         "subvol": "/@",
     }
+    # the helper's run as preview.json gives it, never from a pid (D149)
     return {"table": [root], "root": root, "status": spec.get("status", "current"),
+            "run": spec.get("run", ""),
             "readonly": list(spec.get("readonly") or []), "boot": spec.get("boot"),
             "dua": bool(spec.get("dua", True))}  # fmt: skip
 

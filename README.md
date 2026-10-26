@@ -106,9 +106,10 @@ When a plugin update changes the helper, the card asks you to **Update** it
 with the same dialog. It refuses in a few more situations, and the card says
 which.
 
-The daily scan takes about a minute on an NVMe SSD. If the disk is too slow to
-measure in time, the card says so and keeps the last good sizes; free space and
-the warnings stay exact.
+The daily scan takes about a minute on an NVMe SSD; while it measures, the
+card says "Measuring exact sizes", including the first time right after
+setup. If the disk is too slow to measure in time, the card says so and keeps
+the last good sizes; free space and the warnings stay exact.
 
 ## Other login users
 

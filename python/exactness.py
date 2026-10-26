@@ -11,7 +11,12 @@ Sizes inside the disk are exact only where something measured them:
     setup        btrfs without the helper: the one-time setup panel
     update       btrfs with a helper that differs from the plugin's: the same
                  panel with Update
-    pending      btrfs with a current helper not yet run: measuring
+    pending      btrfs with a current helper not yet run (no last run, or the
+                 last scan ran before setup or before the Update: "absent",
+                 "out-of-date"): measuring, the panel busy (D149)
+    measuring    btrfs with a current helper running now and no measured scan:
+                 only what is exact, and the quiet "Measuring exact sizes"
+                 block; with one, the whole card and the same block (D149)
     refused      the helper would not measure (another login user, D72; a
                  symlink on the way to the plugin, D110): only what is
                  exact, and why in one line
@@ -27,7 +32,7 @@ Sizes inside the disk are exact only where something measured them:
 
 `block()` gives what the card's `exactness` object is made from (the card
 leaves out `mode`, `text` and `issue`); every string is here. An issue
-(link, shared, refused, failed, slow, update) is a warning block on the card
+(link, shared, refused, failed, slow, update, measuring) is a warning block on the card
 (notices.py, D119); the plain `line` is left for setup, pending, retry and
 unavailable.
 """
@@ -39,6 +44,10 @@ FS_NAMES = {"xfs": "XFS", "zfs": "ZFS", "bcachefs": "bcachefs", "f2fs": "F2FS",
 SETUP_LINE = "One-time setup needed · click the drive icon"
 UPDATE_LINE = "Helper update needed · click the drive icon"
 PENDING_LINE = "Measuring exact sizes…"
+MEASURING_LINE = "Measuring exact sizes"
+# a last run of no current helper: the scan before setup, or before the
+# Update; the helper now installed has not run (D149)
+UNRUN = ("absent", "out-of-date")
 FAILED_LINE = "The last measurement didn't finish"
 SHARED_LINE = "Exact sizes need a single-user machine: {why}"
 REFUSED_LINE = "The helper refused this measurement"
@@ -90,10 +99,32 @@ def link_line(reason):
                 REFUSED_LINE)  # fmt: skip
 
 
-def mode_of(fstype, status, last, measured_at):
+def run_state(marker, last, now, alive, limit):
+    """Whether the helper's run in measure-run.json is going on (D149):
+    "running" while its scan is alive and within `limit` seconds (the
+    helper's time limit and a margin), "abandoned" once a run that never
+    wrote measure.json is dead or past its limit, "" with no run or one that
+    finished (its measure.json is as new as its start)."""
+    if not marker:
+        return ""
+    started = marker["started_at"]
+    done = (last or {}).get("measured_at")
+    if units.whole(done, 0) and done >= started:
+        return ""
+    if alive and -units.FUTURE_SLACK <= now - started <= limit:
+        return "running"
+    return "abandoned"
+
+
+def unrun(last):
+    """Whether the last run was of no current helper (D149)."""
+    return (last or {}).get("state") in UNRUN
+
+
+def mode_of(fstype, status, last, measured_at, run=""):
     """(mode, line) from the root filesystem, the helper's status
-    (measure.status), the last run's result (measure.json) and when the
-    measured scan was made (0: none)."""
+    (measure.status), the last run's result (measure.json), when the
+    measured scan was made (0: none) and the run going on (run_state)."""
     measured_scan = measured_at > 0
     if fstype == "ext4":
         return "native", ""
@@ -103,8 +134,17 @@ def mode_of(fstype, status, last, measured_at):
         return "setup", SETUP_LINE
     if status == "out-of-date":
         return "update", UPDATE_LINE
+    if run == "running":
+        # quiet: the run is going on, nothing failed (D149)
+        return ("exact" if measured_scan else "measuring"), MEASURING_LINE
+    if run == "abandoned":
+        # its scan died or ran past its limit without a word: failed
+        last = {"state": "abandoned"}
     if not last:
         return "pending", PENDING_LINE
+    if unrun(last):
+        # the scan before setup (or the Update) is not a failed run (D149)
+        return ("exact", "") if measured_scan else ("pending", PENDING_LINE)
     if last.get("state") == "link":
         return "refused", link_line(last.get("reason") or "")
     if last.get("state") == "denied" and not measured_scan:
@@ -140,9 +180,12 @@ def retrying(last):
 
 def issue_of(mode, last, text):
     """The warning a mode's line becomes (D119): link · shared · refused ·
-    slow · failed · update, or None for a plain line (or none)."""
+    slow · failed · update · measuring (D149), or None for a plain line (or
+    none)."""
     if mode == "update":
         return "update"
+    if text == MEASURING_LINE:
+        return "measuring"
     if mode == "refused":
         if (last or {}).get("state") == "link":
             return "link"
@@ -154,13 +197,13 @@ def issue_of(mode, last, text):
     return None
 
 
-def block(fstype, status, last, measured_at):
+def block(fstype, status, last, measured_at, run=""):
     """{mode, full (the whole card), trend_only, text (the mode's own line,
     for the report), issue (the warning it is on the card, notices.py), line
     (the Glance's one plain line when there is no issue, or ""), panel
     (setup · update · pending: every panel string, the button word, and
     `busy` for pending)}."""
-    mode, text = mode_of(fstype, status, last, measured_at)
+    mode, text = mode_of(fstype, status, last, measured_at, run)
     panel = None
     if mode in ("setup", "update", "pending"):
         panel = {**PANEL, "button": "Update" if mode == "update" else "Set up",
