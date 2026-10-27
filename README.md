@@ -69,6 +69,9 @@ agent (Claude Code in plan mode) with the report and the skill.
 omarchy plugin add https://github.com/nathankramm/omarchy-kanso-disk-space
 ```
 
+It is also listed on the
+[Omarchy plugin marketplace](https://plugins.omarchy.org/plugin.html?id=io.github.nathankramm.kanso-disk-space).
+
 ## Settings
 
 The widget's settings (Omarchy's bar settings for this widget):
