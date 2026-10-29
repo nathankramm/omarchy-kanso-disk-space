@@ -218,6 +218,21 @@ that names a path uses its absolute path: no `~`, no wildcards.
 - Tested on Omarchy's standard btrfs layout; other layouts are less tested.
 - English only.
 
+## How this was built
+
+I chose the problem and wrote the spec. Claude Code wrote most of the code.
+
+It is checked in the development repository (see Development):
+
+- Unit tests for the engine and the card's model, and an independent oracle
+  that works the results out again with separate code.
+- A mutation run: one-defect copies of the engine that must each fail the
+  oracle or a test. At 1.0.1 all 431 were caught.
+- CI runs the tests on every push, and the mutation run by hand or on a
+  release tag.
+- It ran on my own machine for three days before 1.0.0. Real use found bugs
+  the suite could not; the after-sleep fix in 1.0.1 is one of them.
+
 ## Development
 
 Tests, the oracle and its mutation run live in a separate development
