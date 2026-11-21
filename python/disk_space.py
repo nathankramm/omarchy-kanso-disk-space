@@ -34,7 +34,10 @@ Options for every verb: --now <epoch seconds | ISO time> (tests; default the
 clock). State lives in $XDG_STATE_HOME/kanso-disk-space (default
 ~/.local/state/kanso-disk-space, D6) and is written by this engine only:
 whole-file writes are a temp file plus os.replace, samples are appended one
-whole line per write.
+whole line per write. It is private to the account: the folder and ledgers/
+are 0700 and every file is 0600, whatever the umask; each tick (the first
+runs at shell start) tightens what an older install, or the user's agent
+appending to cleanups.jsonl, left 0755/0644.
 
 Free space is `f_bavail * f_frsize` of statvfs("/"), which equals
 `df --output=avail --block-size=1 /`, the number `omarchy update` refuses to
@@ -58,12 +61,14 @@ import argparse
 import contextlib
 import datetime
 import fcntl
+import fnmatch
 import hashlib
 import json
 import math
 import os
 import pwd
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -232,10 +237,72 @@ def take_sample(now):
     return sample
 
 
+def private_dir(directory):
+    """Make `directory` 0700: under umask 077, its parent with the user's
+    umask; an existing one loses its group and other bits (owner bits stay,
+    so a read-only folder stays read-only)."""
+    os.makedirs(os.path.dirname(directory), exist_ok=True)
+    old = os.umask(0o077)
+    try:
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+    finally:
+        os.umask(old)
+    mode = stat.S_IMODE(os.stat(directory).st_mode)
+    if mode & 0o077:
+        os.chmod(directory, mode & 0o700)
+
+
+def state_folders():
+    """The state folder and its ledgers/, the folders private_dir keeps 0700."""
+    return state_dir(), os.path.join(state_dir(), changes.FOLDER)
+
+
+def make_dir(directory):
+    """A state folder private (private_dir), any other (a report's --out
+    folder, ~/Documents) as the user's umask makes it."""
+    real = os.path.realpath(directory)
+    if real in (os.path.realpath(d) for d in state_folders()):
+        private_dir(state_dir())  # ledgers/'s parent is private too
+        private_dir(directory)
+    else:
+        os.makedirs(directory, exist_ok=True)
+
+
+# The files of the state folder and of ledgers/ that private_state sets 0600.
+STATE_FILES = ("*.json", "*.jsonl", ".lock", "report-*.md", ".tmp-*")
+LEDGER_FILES = ("*.json", ".tmp-*")
+
+
+def private_state():
+    """The state folder and ledgers/ 0700, every state file in them 0600.
+    Never follows a link; a file it cannot change is left as it is."""
+    for folder, patterns in zip(state_folders(), (STATE_FILES, LEDGER_FILES)):
+        if folder != state_dir() and not os.path.isdir(folder):
+            continue
+        try:
+            private_dir(folder)
+            names = os.listdir(folder)
+        except OSError as e:
+            print(f"disk_space: {folder}: {e}", file=sys.stderr)
+            continue
+        for name in names:
+            if not any(fnmatch.fnmatchcase(name, p) for p in patterns):
+                continue
+            path = os.path.join(folder, name)
+            try:
+                st = os.lstat(path)
+                mode = stat.S_IMODE(st.st_mode)
+                if stat.S_ISREG(st.st_mode) and mode & 0o177:
+                    os.chmod(path, mode & 0o600)
+            except OSError as e:
+                print(f"disk_space: {path}: {e}", file=sys.stderr)
+
+
 def atomic_write(path, text):
-    """A temp file in the same directory, then os.replace: never a torn file."""
+    """A temp file in the same directory, then os.replace: never a torn file.
+    mkstemp makes the temp file 0600, so the file is 0600 from its first byte."""
     directory = os.path.dirname(path)
-    os.makedirs(directory, exist_ok=True)
+    make_dir(directory)
     fd, tmp = tempfile.mkstemp(prefix=".tmp-", dir=directory)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -254,8 +321,10 @@ def state_lock():
     """One writer at a time: a tick from Service and one by hand must not
     interleave their read-modify-write of alerts.json."""
     directory = state_dir()
-    os.makedirs(directory, exist_ok=True)
-    with open(os.path.join(directory, ".lock"), "a") as f:
+    private_dir(directory)
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC
+    fd = os.open(os.path.join(directory, ".lock"), flags, 0o600)
+    with os.fdopen(fd, "a") as f:
         fcntl.flock(f, fcntl.LOCK_EX)
         yield
 
@@ -297,9 +366,10 @@ def load_samples(path):
 def append_sample(path, sample):
     """One whole line per write. If the file ends in a torn line (a crash
     mid-write), start on a new line so the next sample is not glued to it."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    make_dir(os.path.dirname(path))
     line = json.dumps(sample, separators=(",", ":")) + "\n"
-    with open(path, "ab+") as f:
+    flags = os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC
+    with os.fdopen(os.open(path, flags, 0o600), "ab+") as f:
         f.seek(0, os.SEEK_END)
         if f.tell() > 0:
             f.seek(-1, os.SEEK_END)
@@ -752,6 +822,7 @@ def cmd_tick(now, settings, settings_notice, loaded=None):
     readonly = health.readonly()
     if readonly:
         return readonly_tick(now, settings, settings_notice, table, readonly)
+    private_state()
     with state_lock():
         sample = take_sample(now)
         append_sample(path, sample)

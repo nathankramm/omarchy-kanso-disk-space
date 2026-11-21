@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.2
+
+- State files are now private to your account: the
+  `~/.local/state/kanso-disk-space/` folder and its `ledgers/` are set to
+  0700 and every file in them to 0600, so other accounts on the computer
+  cannot read your disk history, scans or cleanup log. An existing install
+  is fixed the next time the shell starts.
+
 ## 1.0.1
 
 - After the laptop wakes from sleep the bar updates within 30 seconds, and
